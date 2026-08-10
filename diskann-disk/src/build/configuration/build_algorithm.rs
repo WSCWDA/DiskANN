@@ -53,7 +53,7 @@ impl From<&PiPNNParameters> for diskann::graph::pipnn::PiPNNConfig {
             c_min: config.c_min,
             p_samp: config.p_samp,
             fanout: config.fanout.clone(),
-            k: config.k,
+            leaf_k: config.k,
             replicas: config.replicas,
         }
     }
