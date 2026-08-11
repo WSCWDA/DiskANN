@@ -97,8 +97,8 @@ pub(crate) struct State {
 
 /// Select a degree-bounded neighbor set with Vamana RobustPrune.
 ///
-/// `pool` contains candidates in nearest-first order from the source point.
-/// `cache` contains the vector for the candidate at the same position. `None`
+/// `pool` certifies nearest-first candidate order from the source point.
+/// `cache` stores each matching source distance and candidate vector. `None`
 /// excludes that candidate without changing positional alignment. `states` has
 /// one entry for each candidate position.
 ///
@@ -117,6 +117,12 @@ where
     I: Eq,
     D: FnMut(&V, &V) -> f32,
 {
+    debug_assert_eq!(
+        pool.len(),
+        cache.len(),
+        "sorted candidate pool and cache must have equal lengths"
+    );
+
     let mut current_alpha = 1.0f32;
     let increment_factor = alpha.min(1.2);
 
@@ -136,11 +142,11 @@ where
     //
     // On the implementation side, we use `states` in the following way:
     //
-    // * `states[n].neighbor` is the **index** in `pool` of the `n`th **neighbor**.
+    // * `states[n].neighbor` is the **index** in `cache` of the `n`th **neighbor**.
     //   Note that a "neighbor" is a candidate that passes pruning.
     //
     //   Very important: to get the index `j` in the above description, we need to
-    //   check `pool[states[n].neighbor]`.
+    //   check `cache[states[n].neighbor]`.
     //
     //   This indexing naturally skips candidates `j` that have not been promoted to
     //   neighbors.
@@ -150,19 +156,17 @@ where
     //   excludes it from future consideration.
     //
     // * `states[i].last_checked` is the highest value of `n` against which the
-    //   occlude factor for `j = pool[states[n].neighbor]` has been checked.
+    //   occlude factor for `j = cache[states[n].neighbor]` has been checked.
     //
     //   The maximum value this should reach is `i`.
     //
     // Note that we use `states` for both "candidate" and "neighbor" tracking.
     let mut found = 0;
     while found < degree {
-        for (i, (_, neighbor)) in cache.iter().enumerate() {
+        for (i, (neighbor_distance, neighbor)) in cache.iter().enumerate() {
             if found >= degree {
                 break;
             }
-
-            let neighbor_distance = pool[i].distance();
 
             // The tracking states for candidate `i`.
             let State {
@@ -198,8 +202,8 @@ where
                 let result_position = states[last_checked as usize].neighbor.into_usize();
                 last_checked += 1;
 
-                // If the position of this result in `pool` is greater than or equal
-                // the current working position, then skip this candidate.
+                // If the position of this result in `cache` is greater than or equal
+                // to the current working position, then skip this candidate.
                 if result_position >= i {
                     debug_assert!(states.get(i).is_some(), "index {i} is out of bounds");
                     // SAFETY: We've already checked `states[i]`.
