@@ -353,6 +353,7 @@ mod generator_tests {
             4,
             10_000,
         );
+
         assert!(result.is_err());
         assert!(!storage_provider.exists(&compressed_path));
         Ok(())
