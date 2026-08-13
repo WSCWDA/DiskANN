@@ -319,12 +319,13 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             std::ofstream metrics(metrics_output, std::ios::app);
             if (!metrics) throw std::runtime_error("Cannot open metrics output: " + metrics_output);
             if (write_header)
-                metrics << "query_id,L,beam_width,backend,latency_us,io_requests,io_bytes,io_batches,cache_hits,cache_misses,recall\n";
+                metrics << "query_id,L,beam_width,backend,latency_us,io_requests,io_bytes,io_batches,cache_hits,cache_misses,recall,qps\n";
             for (uint64_t query_id = 0; query_id < query_num; ++query_id)
                 metrics << query_id << ',' << L << ',' << optimized_beamwidth << ',' << io_backend << ','
                         << stats[query_id].total_us << ',' << stats[query_id].io_requests << ','
                         << stats[query_id].io_bytes << ',' << stats[query_id].io_batches << ','
-                        << stats[query_id].n_cache_hits << ',' << stats[query_id].cache_misses << ',' << recall << '\n';
+                        << stats[query_id].n_cache_hits << ',' << stats[query_id].cache_misses << ',' << recall << ','
+                        << qps << '\n';
         }
 #endif
         delete[] stats;
