@@ -14,8 +14,12 @@ IoUringReader::~IoUringReader() { deregister_all_threads(); close(); }
 IOContext &IoUringReader::get_ctx()
 {
     std::lock_guard<std::mutex> guard(ctx_mut);
-    auto it = ctx_map.find(std::this_thread::get_id());
-    return it == ctx_map.end() ? bad_ctx_ : it->second;
+    const auto thread_id = std::this_thread::get_id();
+    if (ctx_map.find(thread_id) == ctx_map.end())
+    {
+        return bad_ctx_;
+    }
+    return ctx_map[thread_id];
 }
 void IoUringReader::register_thread()
 {
