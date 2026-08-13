@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
+#include <sys/uio.h>
 #include <unistd.h>
 
 namespace diskann::iobench
@@ -60,12 +61,18 @@ void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
     for (size_t base = 0; base < reqs.size(); base += MAX_IO_DEPTH)
     {
         const size_t count = std::min<size_t>(MAX_IO_DEPTH, reqs.size() - base);
+        // IORING_OP_READV is supported by older io_uring kernels than
+        // IORING_OP_READ. Keep the iovec array alive until all CQEs arrive.
+        // One AlignedRead still maps to exactly one SQE and one iovec.
+        std::vector<iovec> iovecs(count);
         for (size_t i = 0; i < count; ++i)
         {
             io_uring_sqe *sqe = io_uring_get_sqe(ring);
             if (!sqe) throw std::runtime_error("No io_uring SQE");
             auto &req = reqs[base + i];
-            io_uring_prep_read(sqe, fd_, req.buf, static_cast<unsigned>(req.len), req.offset);
+            iovecs[i].iov_base = req.buf;
+            iovecs[i].iov_len = req.len;
+            io_uring_prep_readv(sqe, fd_, &iovecs[i], 1, req.offset);
             io_uring_sqe_set_data64(sqe, base + i);
         }
         const int submitted = io_uring_submit(ring);
@@ -78,8 +85,15 @@ void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
             const size_t index = io_uring_cqe_get_data64(cqe);
             const int result = cqe->res;
             io_uring_cqe_seen(ring, cqe);
+            if (result < 0)
+                throw std::runtime_error("io_uring read failed at offset " +
+                                         std::to_string(reqs[index].offset) + ": " +
+                                         std::string(std::strerror(-result)));
             if (result != static_cast<int>(reqs[index].len))
-                throw std::runtime_error("io_uring read returned " + std::to_string(result));
+                throw std::runtime_error("io_uring short read at offset " +
+                                         std::to_string(reqs[index].offset) + ": returned " +
+                                         std::to_string(result) + ", expected " +
+                                         std::to_string(reqs[index].len));
         }
     }
 }
