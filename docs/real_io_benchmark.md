@@ -20,6 +20,21 @@ scripts/build_real_indexes.sh
 
 These scripts download the official TexMex SIFT1M and GIST1M vectors and invoke DiskANN's own converters and `build_disk_index` application. They do not generate vectors or index files.
 
+Existing datasets may remain outside the repository. For example, with SIFT1M
+under `/home/cwd/dataset/sift_1M`:
+
+```bash
+export DATASET_ROOT=/home/cwd/dataset
+scripts/build_real_indexes.sh sift
+```
+
+The script derives `SIFT_DIR=${DATASET_ROOT}/sift_1M`, reuses existing `.fbin`
+files, and computes `sift_groundtruth.bin` with DiskANN when neither a binary
+nor official `.ivecs` ground truth is present. For persistent machine-local
+configuration, copy `scripts/dataset_paths.env.example` outside the repository,
+edit it, and run with `DATASET_CONFIG=/path/to/dataset_paths.env`. The same
+configuration mechanism is accepted by `run_diskann_matrix.sh`.
+
 ## Capture and performance runs
 
 Tracing is a characterization phase and its latency must not be reported as backend performance:

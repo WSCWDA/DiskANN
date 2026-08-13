@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -n "${DATASET_CONFIG:-}" ]]; then
+  # shellcheck source=/dev/null
+  source "${DATASET_CONFIG}"
+fi
+
 : "${INDEX:?INDEX is required}"
 : "${QUERY:?QUERY is required}"
 : "${GT:?GT is required}"
