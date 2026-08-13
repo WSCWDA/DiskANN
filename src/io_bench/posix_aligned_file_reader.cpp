@@ -58,8 +58,9 @@ void PosixAlignedFileReader::read(std::vector<AlignedRead> &reqs, IOContext &, b
         {
             const ssize_t n = ::pread(fd_, static_cast<char *>(req.buf) + done, req.len - done, req.offset + done);
             if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) throw std::runtime_error("pread failed at offset " + std::to_string(req.offset + done) +
-                                                 ": " + std::strerror(errno));
+            if (n < 0) throw std::runtime_error("pread failed at offset " + std::to_string(req.offset + done) +
+                                                ": " + std::strerror(errno));
+            if (n == 0) throw std::runtime_error("unexpected EOF at offset " + std::to_string(req.offset + done));
             done += static_cast<size_t>(n);
         }
     }
