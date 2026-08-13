@@ -39,3 +39,11 @@ target_link_libraries(${PROJECT_NAME}_unit_tests ${PROJECT_NAME} ${DISKANN_TOOLS
 
 add_test(NAME ${PROJECT_NAME}_unit_tests COMMAND ${PROJECT_NAME}_unit_tests)
 
+if (DISKANN_IO_BENCH AND NOT MSVC)
+    add_executable(test_io_trace_roundtrip io_bench/test_trace_roundtrip.cpp)
+    target_link_libraries(test_io_trace_roundtrip ${PROJECT_NAME} ${DISKANN_ASYNC_LIB})
+    add_test(NAME io_trace_roundtrip COMMAND test_io_trace_roundtrip)
+    add_executable(test_io_backend_correctness io_bench/test_backend_correctness.cpp)
+    target_link_libraries(test_io_backend_correctness ${PROJECT_NAME} ${DISKANN_ASYNC_LIB})
+    add_test(NAME io_backend_correctness COMMAND test_io_backend_correctness)
+endif()
