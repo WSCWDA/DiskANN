@@ -14,6 +14,11 @@ else()
         in_mem_data_store.cpp in_mem_graph_store.cpp
         natural_number_set.cpp memory_mapper.cpp partition.cpp pq.cpp
         pq_flash_index.cpp scratch.cpp logger.cpp utils.cpp filter_utils.cpp index_factory.cpp abstract_index.cpp pq_l2_distance.cpp pq_data_store.cpp)
+    if (DISKANN_IO_BENCH)
+        list(APPEND CPP_SOURCES io_bench/io_trace.cpp io_bench/query_context.cpp
+            io_bench/posix_aligned_file_reader.cpp io_bench/io_uring_reader.cpp
+            io_bench/traced_aligned_file_reader.cpp io_bench/reader_factory.cpp)
+    endif()
     if (RESTAPI)
         list(APPEND CPP_SOURCES restapi/search_wrapper.cpp restapi/server.cpp)
     endif()

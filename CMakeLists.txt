@@ -19,6 +19,9 @@
 cmake_minimum_required(VERSION 3.15)
 project(diskann)
 
+option(DISKANN_IO_BENCH "Build real DiskANN I/O benchmark backends and tools" OFF)
+option(DISKANN_ENABLE_GDS "Build optional cuFile/GDS trace replay backend" OFF)
+
 set(CMAKE_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -261,6 +264,19 @@ endif()
 
 if (NOT MSVC)
     set(DISKANN_ASYNC_LIB aio)
+    if (DISKANN_IO_BENCH)
+        find_path(LIBURING_INCLUDE_DIR liburing.h)
+        find_library(LIBURING_LIBRARY uring)
+        if (LIBURING_INCLUDE_DIR AND LIBURING_LIBRARY)
+            add_compile_definitions(DISKANN_HAS_IO_URING)
+            include_directories(${LIBURING_INCLUDE_DIR})
+            list(APPEND DISKANN_ASYNC_LIB ${LIBURING_LIBRARY})
+            message(STATUS "DiskANN I/O benchmark: io_uring enabled")
+        else()
+            message(WARNING "liburing not found; io-uring backend disabled")
+        endif()
+        add_compile_definitions(DISKANN_IO_BENCH)
+    endif()
 endif()
 
 #Main compiler/linker settings 

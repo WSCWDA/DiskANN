@@ -1451,7 +1451,10 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         if (!frontier.empty())
         {
             if (stats != nullptr)
+            {
                 stats->n_hops++;
+                stats->io_batches++;
+            }
             for (uint64_t i = 0; i < frontier.size(); i++)
             {
                 auto id = frontier[i];
@@ -1466,6 +1469,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 {
                     stats->n_4k++;
                     stats->n_ios++;
+                    stats->cache_misses++;
+                    stats->io_requests++;
+                    stats->io_bytes += num_sectors_per_node * defaults::SECTOR_LEN;
                 }
                 num_ios++;
             }

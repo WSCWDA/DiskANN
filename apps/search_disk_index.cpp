@@ -13,6 +13,10 @@
 #include "timer.h"
 #include "percentile_stats.h"
 #include "program_options_utils.hpp"
+#ifdef DISKANN_IO_BENCH
+#include "io_bench/query_context.h"
+#include "io_bench/reader_factory.h"
+#endif
 
 #ifndef _WINDOWS
 #include <sys/mman.h>
@@ -30,6 +34,13 @@
 #define WARMUP false
 
 namespace po = boost::program_options;
+
+namespace
+{
+std::string io_backend = "libaio";
+std::string io_trace_path;
+std::string metrics_output;
+}
 
 void print_stats(std::string category, std::vector<float> percentiles, std::vector<float> results)
 {
@@ -106,7 +117,11 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     reader.reset(new diskann::BingAlignedFileReader());
 #endif
 #else
+#ifdef DISKANN_IO_BENCH
+    reader = diskann::iobench::create_reader(io_backend, io_trace_path);
+#else
     reader.reset(new LinuxAlignedFileReader());
+#endif
 #endif
 
     std::unique_ptr<diskann::PQFlashIndex<T, LabelT>> _pFlashIndex(
@@ -227,6 +242,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 #pragma omp parallel for schedule(dynamic, 1)
         for (int64_t i = 0; i < (int64_t)query_num; i++)
         {
+#ifdef DISKANN_IO_BENCH
+            diskann::iobench::begin_query(static_cast<uint64_t>(i));
+#endif
             if (!filtered_search)
             {
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
@@ -250,6 +268,9 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
                     use_reorder_data, stats + i);
             }
+#ifdef DISKANN_IO_BENCH
+            diskann::iobench::end_query();
+#endif
         }
         auto e = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = e - s;
@@ -290,6 +311,22 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         }
         else
             diskann::cout << std::endl;
+
+#ifdef DISKANN_IO_BENCH
+        if (!metrics_output.empty())
+        {
+            const bool write_header = !file_exists(metrics_output);
+            std::ofstream metrics(metrics_output, std::ios::app);
+            if (!metrics) throw std::runtime_error("Cannot open metrics output: " + metrics_output);
+            if (write_header)
+                metrics << "query_id,L,beam_width,backend,latency_us,io_requests,io_bytes,io_batches,cache_hits,cache_misses,recall\n";
+            for (uint64_t query_id = 0; query_id < query_num; ++query_id)
+                metrics << query_id << ',' << L << ',' << optimized_beamwidth << ',' << io_backend << ','
+                        << stats[query_id].total_us << ',' << stats[query_id].io_requests << ','
+                        << stats[query_id].io_bytes << ',' << stats[query_id].io_batches << ','
+                        << stats[query_id].n_cache_hits << ',' << stats[query_id].cache_misses << ',' << recall << '\n';
+        }
+#endif
         delete[] stats;
     }
 
@@ -375,6 +412,14 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+#ifdef DISKANN_IO_BENCH
+        optional_configs.add_options()("io_backend", po::value<std::string>(&io_backend)->default_value("libaio"),
+                                       "I/O backend: libaio, pread-direct, pread-buffered, io-uring, or gds");
+        optional_configs.add_options()("io_trace_path", po::value<std::string>(&io_trace_path)->default_value(""),
+                                       "CSV path for real AlignedRead trace; empty disables tracing");
+        optional_configs.add_options()("metrics_output", po::value<std::string>(&metrics_output)->default_value(""),
+                                       "Per-query benchmark metrics CSV");
+#endif
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
