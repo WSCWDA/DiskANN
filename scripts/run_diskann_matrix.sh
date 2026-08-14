@@ -36,6 +36,7 @@ echo "Results: ${results}/raw"
 
 {
   git rev-parse HEAD; uname -a; lscpu; command -v numactl >/dev/null && numactl --hardware || true; lsblk
+  env | LC_ALL=C sort | grep '^DISKANN_' || true
 } > "${results}/environment.txt"
 
 for backend in "${backends[@]}"; do for W in "${beams[@]}"; do for T in "${threads[@]}"; do for C in "${caches[@]}"; do
@@ -86,6 +87,10 @@ for backend in "${backends[@]}"; do for W in "${beams[@]}"; do for T in "${threa
       failed_runs=$((failed_runs + 1))
       echo "DiskANN search failed (status=${status}). Last stderr lines:" >&2
       tail -n 40 "${stem}.stderr" >&2 || true
+      if [[ -s "${stem}.stdout" ]]; then
+        echo "Last stdout lines:" >&2
+        tail -n 40 "${stem}.stdout" >&2 || true
+      fi
       echo "Full logs: ${stem}.stdout and ${stem}.stderr" >&2
       if [[ "${continue_on_error}" != 1 ]]; then exit 1; fi
       continue

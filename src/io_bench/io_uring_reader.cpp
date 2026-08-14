@@ -19,6 +19,12 @@ IoUringReader::IoUringReader()
         if (parsed > 0)
             completion_timeout_ms_ = parsed;
     }
+    if (const char *value = std::getenv("DISKANN_IO_URING_MAX_BATCH"))
+    {
+        const unsigned long long parsed = std::strtoull(value, nullptr, 10);
+        if (parsed > 0)
+            max_batch_size_ = std::min<size_t>(parsed, MAX_IO_DEPTH);
+    }
 }
 IoUringReader::~IoUringReader() { deregister_all_threads(); close(); }
 IOContext &IoUringReader::get_ctx()
@@ -79,9 +85,9 @@ void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
     io_uring *ring = nullptr;
     { std::lock_guard<std::mutex> guard(ctx_mut); auto it = rings_.find(std::this_thread::get_id());
       if (it == rings_.end()) throw std::runtime_error("io-uring thread is not registered"); ring = it->second; }
-    for (size_t base = 0; base < reqs.size(); base += MAX_IO_DEPTH)
+    for (size_t base = 0; base < reqs.size(); base += max_batch_size_)
     {
-        const size_t count = std::min<size_t>(MAX_IO_DEPTH, reqs.size() - base);
+        const size_t count = std::min<size_t>(max_batch_size_, reqs.size() - base);
         // IORING_OP_READV is supported by older io_uring kernels than
         // IORING_OP_READ. Keep the iovec array alive until all CQEs arrive.
         // One AlignedRead still maps to exactly one SQE and one iovec.
@@ -94,10 +100,6 @@ void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
             iovecs[i].iov_base = req.buf;
             iovecs[i].iov_len = req.len;
             io_uring_prep_readv(sqe, fd_, &iovecs[i], 1, req.offset);
-            // Force regular-file O_DIRECT reads onto an io_uring worker.  On
-            // some older kernels, a batch can otherwise remain stuck after
-            // the initial non-blocking attempt and never produce a CQE.
-            io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
             io_uring_sqe_set_data64(sqe, base + i);
         }
         const int submitted = io_uring_submit(ring);

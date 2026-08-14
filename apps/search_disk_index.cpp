@@ -538,8 +538,7 @@ int main(int argc, char **argv)
     }
     catch (const std::exception &e)
     {
-        std::cout << std::string(e.what()) << std::endl;
-        diskann::cerr << "Index search failed." << std::endl;
+        diskann::cerr << "Index search failed: " << e.what() << std::endl;
         return -1;
     }
 }
