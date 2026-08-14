@@ -23,7 +23,9 @@ std::shared_ptr<AlignedFileReader> create_reader(const std::string &backend, con
 #else
     else if (type == IOBackendType::IO_URING) throw std::runtime_error("io-uring backend was not built");
 #endif
-    else if (type == IOBackendType::GDS) throw std::runtime_error("GDS backend was not built");
+    else if (type == IOBackendType::GDS)
+        throw std::runtime_error("GDS is available only in replay_diskann_trace because CPU PQFlashIndex requires "
+                                 "host-resident buffers");
 #else
     (void)type;
     throw std::runtime_error("DiskANN I/O benchmark backends are Linux-only");

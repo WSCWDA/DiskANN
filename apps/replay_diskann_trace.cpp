@@ -4,6 +4,11 @@
 #include "io_bench/reader_factory.h"
 #include "utils.h"
 
+#ifdef DISKANN_HAS_GDS
+#include "io_bench/gds_replay_reader.h"
+#endif
+
+#include <algorithm>
 #include <fstream>
 #include <cstring>
 #include <cstdlib>
@@ -43,11 +48,13 @@ uint64_t xxhash64(const void *input, size_t len, uint64_t seed = 0)
 int main(int argc, char **argv)
 {
     std::string trace_path,index_file,backend="libaio",hash_output,verify_hashes,metrics_output;
+    int device_id=0;
     po::options_description desc("Replay real DiskANN AlignedRead trace");
     desc.add_options()("help,h","help")
       ("trace",po::value<std::string>(&trace_path)->required(),"trace CSV")
       ("index_file",po::value<std::string>(&index_file)->required(),"DiskANN disk index file")
       ("io_backend",po::value<std::string>(&backend)->default_value("libaio"),"backend")
+      ("device_id",po::value<int>(&device_id)->default_value(0),"CUDA device for GDS replay")
       ("hash_output",po::value<std::string>(&hash_output)->default_value(""),"write offset,len,xxhash64")
       ("verify_hashes",po::value<std::string>(&verify_hashes)->default_value(""),"verify baseline hash CSV")
       ("metrics_output",po::value<std::string>(&metrics_output)->default_value(""),"batch metrics CSV");
@@ -56,13 +63,28 @@ int main(int argc, char **argv)
     catch(const std::exception &e){std::cerr<<e.what()<<'\n'<<desc;return 2;}
 
     auto records=diskann::iobench::read_trace(trace_path);
+    if(records.empty())throw std::runtime_error("trace contains no requests");
     std::map<std::pair<uint64_t,uint64_t>,uint64_t> expected;
-    if(!verify_hashes.empty()){std::ifstream in(verify_hashes);std::string line;std::getline(in,line);
+    if(!verify_hashes.empty()){std::ifstream in(verify_hashes);if(!in)throw std::runtime_error("cannot open hash baseline: "+verify_hashes);std::string line;std::getline(in,line);
       while(std::getline(in,line)){std::stringstream s(line);std::string a,b,c;std::getline(s,a,',');std::getline(s,b,',');std::getline(s,c,',');expected[{std::stoull(a),std::stoull(b)}]=std::stoull(c);}}
     std::ofstream hashes,metrics;
     if(!hash_output.empty()){hashes.open(hash_output);hashes<<"offset,len,xxhash64\n";}
     if(!metrics_output.empty()){metrics.open(metrics_output);metrics<<"query_id,batch_id,batch_size,bytes,latency_ns,backend\n";}
-    auto reader=diskann::iobench::create_reader(backend); reader->open(index_file); reader->register_thread();
+    size_t max_batch_bytes=0;
+    for(size_t begin=0;begin<records.size();){size_t end=begin;size_t bytes=0;
+      while(end<records.size()&&records[end].query_id==records[begin].query_id&&records[end].batch_id==records[begin].batch_id){bytes+=records[end].len;++end;}
+      max_batch_bytes=std::max(max_batch_bytes,bytes);begin=end;}
+    std::shared_ptr<AlignedFileReader> reader;
+#ifdef DISKANN_HAS_GDS
+    std::unique_ptr<diskann::iobench::GDSReplayReader> gds_reader;
+#endif
+    if(backend=="gds"){
+#ifdef DISKANN_HAS_GDS
+      gds_reader=std::make_unique<diskann::iobench::GDSReplayReader>(device_id,max_batch_bytes);gds_reader->open(index_file);
+#else
+      throw std::runtime_error("GDS replay was not built; configure with -DDISKANN_ENABLE_GDS=ON");
+#endif
+    }else{reader=diskann::iobench::create_reader(backend);reader->open(index_file);reader->register_thread();}
     size_t pos=0; uint64_t total_bytes=0; bool pass=true;
     while(pos<records.size()){
       const auto q=records[pos].query_id;const auto b=records[pos].batch_id;size_t end=pos;
@@ -70,15 +92,26 @@ int main(int argc, char **argv)
       std::vector<AlignedRead> reqs;std::vector<void*> bufs;uint64_t batch_bytes=0;
       for(size_t i=pos;i<end;++i){void *buf=nullptr;if(posix_memalign(&buf,4096,records[i].len)!=0)throw std::bad_alloc();
         bufs.push_back(buf);reqs.emplace_back(records[i].offset,records[i].len,buf);batch_bytes+=records[i].len;}
-      const auto start=diskann::iobench::monotonic_time_ns();reader->read(reqs,reader->get_ctx());
+      const auto start=diskann::iobench::monotonic_time_ns();
+#ifdef DISKANN_HAS_GDS
+      if(gds_reader)gds_reader->read(reqs);else
+#endif
+      reader->read(reqs,reader->get_ctx());
       const auto elapsed=diskann::iobench::monotonic_time_ns()-start;
+#ifdef DISKANN_HAS_GDS
+      if(gds_reader)gds_reader->copy_to_host(reqs);
+#endif
       for(size_t i=0;i<reqs.size();++i){const auto h=xxhash64(reqs[i].buf,reqs[i].len);auto key=std::make_pair(reqs[i].offset,reqs[i].len);
-        if(hashes)hashes<<key.first<<','<<key.second<<','<<h<<'\n';auto it=expected.find(key);if(it!=expected.end()&&it->second!=h)pass=false;free(bufs[i]);}
+        if(hashes)hashes<<key.first<<','<<key.second<<','<<h<<'\n';auto it=expected.find(key);if(!verify_hashes.empty()&&(it==expected.end()||it->second!=h))pass=false;free(bufs[i]);}
       if(metrics)metrics<<q<<','<<b<<','<<reqs.size()<<','<<batch_bytes<<','<<elapsed<<','<<backend<<'\n';
       total_bytes+=batch_bytes;pos=end;
     }
-    reader->deregister_thread();reader->close();
+#ifdef DISKANN_HAS_GDS
+    if(gds_reader)gds_reader->close();else
+#endif
+    {reader->deregister_thread();reader->close();}
     std::cout<<"Real DiskANN requests: "<<records.size()<<"\nSynthetic DiskANN requests: 0\nRead-content: "<<(pass?"PASS":"FAIL")
-             <<"\nAlignment: PASS\nBytes replayed: "<<total_bytes<<'\n';
+             <<"\nAlignment: PASS\nDestination: "<<(backend=="gds"?"gpu":"cpu")
+             <<"\nTimed D2H verification copy: no\nBytes replayed: "<<total_bytes<<'\n';
     return pass?0:1;
 }

@@ -22,6 +22,12 @@ target_link_libraries(search_disk_index ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${D
 if (DISKANN_IO_BENCH AND NOT MSVC)
     add_executable(replay_diskann_trace replay_diskann_trace.cpp)
     target_link_libraries(replay_diskann_trace ${PROJECT_NAME} ${DISKANN_ASYNC_LIB} ${DISKANN_TOOLS_TCMALLOC_LINK_OPTIONS} Boost::program_options)
+    if (DISKANN_ENABLE_GDS)
+        target_sources(replay_diskann_trace PRIVATE ../src/io_bench/gds_replay_reader.cpp)
+        target_include_directories(replay_diskann_trace PRIVATE
+            ${DISKANN_CUDA_INCLUDE_DIR} ${DISKANN_CUFILE_INCLUDE_DIR})
+        target_link_libraries(replay_diskann_trace ${DISKANN_CUDART_LIBRARY} ${DISKANN_CUFILE_LIBRARY})
+    endif()
 endif()
 
 add_executable(range_search_disk_index range_search_disk_index.cpp)

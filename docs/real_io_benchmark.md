@@ -11,6 +11,19 @@ cmake --build build -j
 
 `liburing` is detected independently. If unavailable, all non-io_uring CPU paths still build. CUDA and cuFile are not dependencies of the CPU benchmark.
 
+To add the optional SSD-to-GPU trace-replay path, configure with the CUDA toolkit that provides cuFile:
+
+```bash
+CUDA_HOME=/usr/local/cuda cmake -S . -B build-gds -DCMAKE_BUILD_TYPE=Release \
+  -DDISKANN_IO_BENCH=ON -DDISKANN_ENABLE_GDS=ON
+cmake --build build-gds -j
+```
+
+Configuration fails instead of silently falling back when `cuda_runtime_api.h`, `cufile.h`, `libcudart`, or
+`libcufile` is missing. GDS is intentionally available only in `replay_diskann_trace`: the CPU `PQFlashIndex`
+consumes host-resident buffers, so exposing an SSD-to-HBM reader through `AlignedFileReader` would require an
+implicit D2H copy and would not measure a GPU I/O path.
+
 ## Data and index
 
 ```bash
@@ -64,6 +77,19 @@ Set `INDEX_FILE` to the physical disk-index file opened by `PQFlashIndex` (norma
 TRACE=results/traces/trace.csv INDEX_FILE=indexes/sift1m_R64_L100_disk.index scripts/replay_matrix.sh
 ```
 
+Enable the optional GDS pass with:
+
+```bash
+TRACE=results/traces/trace.csv INDEX_FILE=indexes/sift1m_R64_L100_disk.index \
+BUILD_ROOT=build-gds RESULTS_ROOT=results CUDA_DEVICE=0 GDS_REPLAY=1 scripts/replay_matrix.sh
+```
+
+The GDS implementation reuses one registered GPU buffer sized for the largest real DiskANN batch. Each trace
+request is issued with `cuFileRead` into a distinct region of that buffer. Batch latency covers only the synchronous
+SSD-to-HBM reads. The subsequent D2H copy used for XXH64 comparison is outside the timed region. This first GDS
+mode is synchronous; it preserves requests and batch boundaries but does not claim cuFile batch or async queue-depth
+performance.
+
 The libaio pass writes XXH64 checksums for each real `(offset,len)` request. Other backends must match. Replay isolates storage-path cost; it is not DiskANN end-to-end query latency.
 
 ## Summaries
@@ -78,4 +104,7 @@ Only trace-disabled runs belong in final performance figures. Compare identical 
 
 ## Current scope
 
-The first phase implements libaio + `O_DIRECT`, synchronous pread + `O_DIRECT`, buffered pread, and io_uring + `O_DIRECT`. GDS is reserved for a separately compiled trace-replay module because its destination is GPU HBM, whereas CPU DiskANN requires the returned bytes in DRAM. A GDS replay result therefore answers SSD-to-GPU cost for real DiskANN requests, not whether GPU DiskANN is faster.
+The CPU search path implements libaio + `O_DIRECT`, synchronous pread + `O_DIRECT`, buffered pread, and io_uring +
+`O_DIRECT`. The optional GDS module replays the same captured requests into GPU HBM. A GDS replay result therefore
+answers SSD-to-GPU cost for real DiskANN requests, not whether GPU DiskANN is faster. Report CUDA, cuFile,
+`nvidia-fs`, filesystem/mount, GPU/SSD topology, `gdscheck -p`, and whether cuFile compatibility mode is active.

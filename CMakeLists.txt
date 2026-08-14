@@ -22,6 +22,10 @@ project(diskann)
 option(DISKANN_IO_BENCH "Build real DiskANN I/O benchmark backends and tools" OFF)
 option(DISKANN_ENABLE_GDS "Build optional cuFile/GDS trace replay backend" OFF)
 
+if(DISKANN_ENABLE_GDS AND NOT DISKANN_IO_BENCH)
+    message(FATAL_ERROR "DISKANN_ENABLE_GDS=ON requires DISKANN_IO_BENCH=ON")
+endif()
+
 set(CMAKE_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -276,6 +280,28 @@ if (NOT MSVC)
             message(WARNING "liburing not found; io-uring backend disabled")
         endif()
         add_compile_definitions(DISKANN_IO_BENCH)
+        if (DISKANN_ENABLE_GDS)
+            find_path(DISKANN_CUDA_INCLUDE_DIR cuda_runtime_api.h
+                HINTS ENV CUDA_HOME ENV CUDA_PATH /usr/local/cuda
+                PATH_SUFFIXES include)
+            find_path(DISKANN_CUFILE_INCLUDE_DIR cufile.h
+                HINTS ENV CUDA_HOME ENV CUDA_PATH /usr/local/cuda
+                PATH_SUFFIXES include include/cuda)
+            find_library(DISKANN_CUDART_LIBRARY cudart
+                HINTS ENV CUDA_HOME ENV CUDA_PATH /usr/local/cuda
+                PATH_SUFFIXES lib64 lib x86_64-linux-gnu)
+            find_library(DISKANN_CUFILE_LIBRARY cufile
+                HINTS ENV CUDA_HOME ENV CUDA_PATH /usr/local/cuda
+                PATH_SUFFIXES lib64 lib x86_64-linux-gnu)
+            if (NOT DISKANN_CUDA_INCLUDE_DIR OR NOT DISKANN_CUFILE_INCLUDE_DIR OR
+                NOT DISKANN_CUDART_LIBRARY OR NOT DISKANN_CUFILE_LIBRARY)
+                message(FATAL_ERROR
+                    "DISKANN_ENABLE_GDS=ON requires cuda_runtime_api.h, cufile.h, libcudart, and libcufile. "
+                    "Set CUDA_HOME to the CUDA toolkit containing GDS.")
+            endif()
+            add_compile_definitions(DISKANN_HAS_GDS)
+            message(STATUS "DiskANN I/O benchmark: GDS trace replay enabled")
+        endif()
     endif()
 endif()
 
