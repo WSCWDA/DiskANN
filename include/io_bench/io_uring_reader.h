@@ -20,7 +20,9 @@ class IoUringReader final : public AlignedFileReader
     void read(std::vector<AlignedRead> &read_reqs, IOContext &ctx, bool async = false) override;
 
   private:
+    void discard_current_thread_ring(io_uring *ring);
     int fd_ = -1;
+    uint64_t completion_timeout_ms_ = 60000;
     IOContext bad_ctx_ = (IOContext)-1;
     tsl::robin_map<std::thread::id, io_uring *> rings_;
 };

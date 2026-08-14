@@ -2,6 +2,7 @@
 
 #if !defined(_WINDOWS) && defined(DISKANN_HAS_IO_URING)
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
@@ -10,7 +11,15 @@
 
 namespace diskann::iobench
 {
-IoUringReader::IoUringReader() = default;
+IoUringReader::IoUringReader()
+{
+    if (const char *value = std::getenv("DISKANN_IO_URING_TIMEOUT_MS"))
+    {
+        const unsigned long long parsed = std::strtoull(value, nullptr, 10);
+        if (parsed > 0)
+            completion_timeout_ms_ = parsed;
+    }
+}
 IoUringReader::~IoUringReader() { deregister_all_threads(); close(); }
 IOContext &IoUringReader::get_ctx()
 {
@@ -53,6 +62,18 @@ void IoUringReader::open(const std::string &fname)
     if (fd_ < 0) throw std::runtime_error("open(" + fname + ") failed: " + std::strerror(errno));
 }
 void IoUringReader::close() { if (fd_ >= 0) { ::close(fd_); fd_ = -1; } }
+void IoUringReader::discard_current_thread_ring(io_uring *ring)
+{
+    // Tear down the ring before request-local iovecs leave scope. This asks
+    // the kernel to cancel/reap outstanding requests and prevents a later
+    // destructor from calling queue_exit on the same ring twice.
+    io_uring_queue_exit(ring);
+    std::lock_guard<std::mutex> guard(ctx_mut);
+    const auto thread_id = std::this_thread::get_id();
+    rings_.erase(thread_id);
+    ctx_map.erase(thread_id);
+    delete ring;
+}
 void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
 {
     io_uring *ring = nullptr;
@@ -80,7 +101,19 @@ void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
         for (size_t i = 0; i < count; ++i)
         {
             io_uring_cqe *cqe = nullptr;
-            const int rc = io_uring_wait_cqe(ring, &cqe);
+            __kernel_timespec timeout{};
+            timeout.tv_sec = completion_timeout_ms_ / 1000;
+            timeout.tv_nsec = (completion_timeout_ms_ % 1000) * 1000000;
+            const int rc = io_uring_wait_cqe_timeout(ring, &cqe, &timeout);
+            if (rc == -ETIME)
+            {
+                const std::string message =
+                    "io_uring completion timeout after " + std::to_string(completion_timeout_ms_) +
+                    " ms: batch_start=" + std::to_string(base) + ", batch_size=" + std::to_string(count) +
+                    ", completed=" + std::to_string(i) + ", remaining=" + std::to_string(count - i);
+                discard_current_thread_ring(ring);
+                throw std::runtime_error(message);
+            }
             if (rc < 0) throw std::runtime_error("io_uring_wait_cqe: " + std::string(std::strerror(-rc)));
             const size_t index = io_uring_cqe_get_data64(cqe);
             const int result = cqe->res;

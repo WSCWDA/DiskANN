@@ -49,6 +49,13 @@ QUERY=data/sift/sift_query.fbin GT=data/sift/sift_groundtruth.ibin scripts/run_d
 
 The script stores the DiskANN commit, kernel, CPU, NUMA topology, and block devices in `results/environment.txt`. Record the filesystem, exact SSD model/firmware, mount options, CPU affinity, NUMA binding, CUDA/cuFile versions, and controller-cache limitations alongside it before publishing results.
 
+Matrix runs are resumable by default. A run is skipped only when its metrics,
+ID result, and distance result files are all non-empty. Partial files are moved
+to `results/incomplete/` before retry. `RUN_TIMEOUT` limits each search process
+(default `20m`), `CONTINUE_ON_ERROR=1` continues the remaining matrix, and
+`DISKANN_IO_URING_TIMEOUT_MS` limits one io_uring completion wait (default
+60000 ms). Set `RESUME=0` only when intentionally repeating every run.
+
 ## Replay correctness
 
 Set `INDEX_FILE` to the physical disk-index file opened by `PQFlashIndex` (normally the prefix plus `_disk.index`), then replay one captured trace:
