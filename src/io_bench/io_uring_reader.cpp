@@ -94,6 +94,10 @@ void IoUringReader::read(std::vector<AlignedRead> &reqs, IOContext &, bool)
             iovecs[i].iov_base = req.buf;
             iovecs[i].iov_len = req.len;
             io_uring_prep_readv(sqe, fd_, &iovecs[i], 1, req.offset);
+            // Force regular-file O_DIRECT reads onto an io_uring worker.  On
+            // some older kernels, a batch can otherwise remain stuck after
+            // the initial non-blocking attempt and never produce a CQE.
+            io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
             io_uring_sqe_set_data64(sqe, base + i);
         }
         const int submitted = io_uring_submit(ring);
