@@ -8,6 +8,9 @@
 #include "pq_scratch.h"
 #include "pq_flash_index.h"
 #include "cosine_similarity.h"
+#ifdef DISKANN_IO_BENCH
+#include "io_bench/node_trace.h"
+#endif
 
 #ifdef _WINDOWS
 #include "windows_aligned_file_reader.h"
@@ -1272,6 +1275,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  QueryStats *stats)
 {
 
+#ifdef DISKANN_IO_BENCH
+    iobench::NodeTrace node_trace;
+#endif
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
     if (beam_width > num_sector_per_nodes * defaults::MAX_N_SECTOR_READS)
         throw ANNException("Beamwidth can not be higher than defaults::MAX_N_SECTOR_READS", -1, __FUNCSIG__, __FILE__,
@@ -1399,6 +1405,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     compute_dists(&best_medoid, 1, dist_scratch);
     retset.insert(Neighbor(best_medoid, dist_scratch[0]));
     visited.insert(best_medoid);
+#ifdef DISKANN_IO_BENCH
+    node_trace.add("ENTRY", best_medoid, get_node_sector(best_medoid) * defaults::SECTOR_LEN);
+#endif
 
     uint32_t cmps = 0;
     uint32_t hops = 0;
@@ -1428,10 +1437,16 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         {
             auto nbr = retset.closest_unexpanded();
             num_seen++;
+#ifdef DISKANN_IO_BENCH
+            node_trace.add("EXPAND", nbr.id, get_node_sector(nbr.id) * defaults::SECTOR_LEN);
+#endif
             auto iter = _nhood_cache.find(nbr.id);
             if (iter != _nhood_cache.end())
             {
                 cached_nhoods.push_back(std::make_pair(nbr.id, iter->second));
+#ifdef DISKANN_IO_BENCH
+                node_trace.add("CACHE_HIT", nbr.id, get_node_sector(nbr.id) * defaults::SECTOR_LEN);
+#endif
                 if (stats != nullptr)
                 {
                     stats->n_cache_hits++;
@@ -1463,6 +1478,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 fnhood.second = sector_scratch + num_sectors_per_node * sector_scratch_idx * defaults::SECTOR_LEN;
                 sector_scratch_idx++;
                 frontier_nhoods.push_back(fnhood);
+#ifdef DISKANN_IO_BENCH
+                node_trace.add("IO_SUBMIT", id, get_node_sector(id) * defaults::SECTOR_LEN);
+#endif
                 frontier_read_reqs.emplace_back(get_node_sector((size_t)id) * defaults::SECTOR_LEN,
                                                 num_sectors_per_node * defaults::SECTOR_LEN, fnhood.second);
                 if (stats != nullptr)
@@ -1509,6 +1527,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             full_retset.push_back(Neighbor((uint32_t)cached_nhood.first, cur_expanded_dist));
 
             uint64_t nnbrs = cached_nhood.second.first;
+#ifdef DISKANN_IO_BENCH
+            node_trace.add("NEIGHBORS", cached_nhood.first, get_node_sector(cached_nhood.first) * defaults::SECTOR_LEN, static_cast<uint32_t>(nnbrs));
+#endif
             uint32_t *node_nbrs = cached_nhood.second.second;
 
             // compute node_nbrs <-> query dists in PQ space
@@ -1557,6 +1578,9 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             char *node_disk_buf = offset_to_node(frontier_nhood.second, frontier_nhood.first);
             uint32_t *node_buf = offset_to_node_nhood(node_disk_buf);
             uint64_t nnbrs = (uint64_t)(*node_buf);
+#ifdef DISKANN_IO_BENCH
+            node_trace.add("NEIGHBORS", frontier_nhood.first, get_node_sector(frontier_nhood.first) * defaults::SECTOR_LEN, static_cast<uint32_t>(nnbrs));
+#endif
             T *node_fp_coords = offset_to_node_coords(node_disk_buf);
             memcpy(data_buf, node_fp_coords, _disk_bytes_per_point);
             float cur_expanded_dist;
