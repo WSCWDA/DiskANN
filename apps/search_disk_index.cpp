@@ -4,6 +4,7 @@
 #include "common_includes.h"
 #include "qshape/baseline.h"
 #include "qshape/query_grouping.h"
+#include "qshape/query_scheduler.h"
 #include <boost/program_options.hpp>
 
 #include "index.h"
@@ -233,14 +234,16 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             grouping = qshape::group_queries(query,query_num,query_dim,query_aligned_dim,qshape::grouping_config(),metric_name);
         }
         const auto grouping_ns = qshape::config().enabled ? qshape::now_ns()-grouping_start : 0;
+        const bool group_aware=qshape::config().enabled && qshape::scheduler_config().policy=="group-aware";
+        const auto scheduler_init_start=qshape::config().enabled?qshape::now_ns():0;
+        qshape::GroupScheduler scheduler(group_aware?query_num:0,qshape::grouping_config().group_size,qshape::scheduler_config().lookahead);
+        const auto scheduler_init_ns=qshape::config().enabled?qshape::now_ns()-scheduler_init_start:0;
         auto s = std::chrono::high_resolution_clock::now();
-
-#pragma omp parallel for schedule(dynamic, 1)
-        for (int64_t pos = 0; pos < (int64_t)query_num; pos++)
+        auto search_one = [&](int64_t pos, uint64_t dispatch_ns, uint64_t take_ns)
         {
             const int64_t i = qshape::config().enabled ? grouping.order[pos] : pos;
             auto* record = qshape::config().enabled ? &records[i] : nullptr;
-            if(record) { record->id=i; record->execution_id=pos; record->group_id=pos/qshape::grouping_config().group_size; record->thread=omp_get_thread_num(); }
+            if(record) { record->id=i; record->execution_id=pos; record->group_id=pos/qshape::grouping_config().group_size; record->thread=omp_get_thread_num(); record->dispatch_ns=dispatch_ns; record->scheduler_ns=take_ns; }
             qshape::Scope scope(record);
             if (!filtered_search)
             {
@@ -265,6 +268,25 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                     query_result_dists[test_id].data() + (i * recall_at), optimized_beamwidth, true, label_for_search,
                     use_reorder_data, stats + i);
             }
+        };
+        if(group_aware){
+#pragma omp parallel
+            {
+                while(true){
+                    const auto t=qshape::now_ns();
+                    const auto pos=scheduler.take();
+                    const auto dispatch=qshape::now_ns();
+                    if(pos==qshape::GroupScheduler::none())break;
+                    search_one(pos,dispatch,dispatch-t);
+                    const auto done_start=qshape::now_ns();
+                    scheduler.done(pos/qshape::grouping_config().group_size);
+                    records[grouping.order[pos]].scheduler_ns+=qshape::now_ns()-done_start;
+                }
+            }
+        }else{
+#pragma omp parallel for schedule(dynamic, 1)
+            for(int64_t pos=0;pos<(int64_t)query_num;++pos)
+                search_one(pos,qshape::config().enabled?qshape::now_ns():0,0);
         }
         auto e = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = e - s;
@@ -277,6 +299,11 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
             out<<"policy,group_size,candidate_pool,seed,comparisons,grouping_ns,search_ns,e2e_ns,e2e_qps\n"
                <<qshape::grouping_config().policy<<','<<qshape::grouping_config().group_size<<','<<qshape::grouping_config().candidate_pool<<','<<qshape::grouping_config().seed<<','<<grouping.comparisons<<','<<grouping_ns<<','<<static_cast<uint64_t>(diff.count()*1e9)<<','<<finish-arrival<<','<<query_num*1e9/(finish-arrival)<<'\n';
             if(!out) throw std::runtime_error("grouping output failed");
+            std::ofstream so(prefix+"_scheduler.csv");
+            uint64_t cost=0;for(const auto& q:records)cost+=q.scheduler_ns;
+            so<<"scheduler,lookahead,init_ns,worker_scheduler_ns,distance_ns,ranking_ns,maintenance_ns\n"
+              <<qshape::scheduler_config().policy<<','<<qshape::scheduler_config().lookahead<<','<<scheduler_init_ns<<','<<cost<<','<<grouping.distance_ns<<','<<grouping.ranking_ns<<','<<grouping.maintenance_ns<<'\n';
+            if(!so)throw std::runtime_error("scheduler output failed");
         }
 
         diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(), query_result_ids[test_id].data(),
@@ -408,6 +435,8 @@ int main(int argc, char **argv)
         optional_configs.add_options()("qshape-candidate-pool",po::value<uint32_t>(&qshape::grouping_config().candidate_pool)->default_value(256),"Bounded candidate pool");
         optional_configs.add_options()("qshape-seed",po::value<uint32_t>(&qshape::grouping_config().seed)->default_value(42),"Random seed");
         optional_configs.add_options()("qshape-oracle-file",po::value<std::string>(&qshape::grouping_config().oracle_file)->default_value(""),"Offline evaluation permutation");
+        optional_configs.add_options()("qshape-scheduler",po::value<std::string>(&qshape::scheduler_config().policy)->default_value("reorder"),"reorder/group-aware");
+        optional_configs.add_options()("qshape-lookahead",po::value<uint32_t>(&qshape::scheduler_config().lookahead)->default_value(4),"Pending group lookahead");
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
 
@@ -419,6 +448,9 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
+        if(qshape::scheduler_config().policy!="reorder"&&qshape::scheduler_config().policy!="group-aware")throw std::runtime_error("invalid scheduler");
+        if(!qshape::scheduler_config().lookahead)throw std::runtime_error("invalid scheduler lookahead");
+        if(qshape::scheduler_config().policy!="reorder"&&!qshape::config().enabled)throw std::runtime_error("scheduler requires qshape-enable");
         const auto& gc=qshape::grouping_config();
         if(gc.policy!="original" && gc.policy!="random" && gc.policy!="similarity" && gc.policy!="oracle") throw std::runtime_error("invalid grouping policy");
         if(!gc.group_size || !gc.candidate_pool || (gc.policy=="similarity" && gc.candidate_pool<gc.group_size-1)) throw std::runtime_error("invalid grouping size/pool");

@@ -1,4 +1,5 @@
 #pragma once
+#include "baseline.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -16,7 +17,7 @@ struct GroupingConfig {
  uint32_t group_size=64, candidate_pool=256, seed=42;
 };
 inline GroupingConfig& grouping_config(){ static GroupingConfig c; return c; }
-struct GroupingResult { std::vector<uint32_t> order; uint64_t comparisons=0; };
+struct GroupingResult { std::vector<uint32_t> order; uint64_t comparisons=0,distance_ns=0,ranking_ns=0,maintenance_ns=0; };
 template<class T>
 GroupingResult group_queries(const T* data,size_t n,size_t dim,size_t stride,
  const GroupingConfig& c,const std::string& metric) {
@@ -57,6 +58,7 @@ GroupingResult group_queries(const T* data,size_t n,size_t dim,size_t stride,
  };
  order.clear();
  while(!remaining.empty()){
+  const auto m0=now_ns();
   const auto seed=remaining.front();
   remaining.front()=remaining.back();remaining.pop_back();
   order.push_back(seed);
@@ -64,13 +66,17 @@ GroupingResult group_queries(const T* data,size_t n,size_t dim,size_t stride,
   const size_t take=std::min<size_t>(c.group_size-1,remaining.size());
   if(take>count) throw std::invalid_argument("candidate pool smaller than group_size-1");
   std::vector<std::pair<double,size_t>> ranked;ranked.reserve(count);
+  const auto d0=now_ns();result.maintenance_ns+=d0-m0;
   for(size_t j=0;j<count;++j){double s=score(seed,remaining[j]);if(!std::isfinite(s)) throw std::runtime_error("nonfinite query similarity");ranked.emplace_back(s,j);}
+  const auto r0=now_ns();result.distance_ns+=r0-d0;
   result.comparisons+=count;
   std::partial_sort(ranked.begin(),ranked.begin()+take,ranked.end());
   std::vector<size_t> erase;erase.reserve(take);
   for(size_t j=0;j<take;++j){auto pos=ranked[j].second;order.push_back(remaining[pos]);erase.push_back(pos);}
+  const auto m1=now_ns();result.ranking_ns+=m1-r0;
   std::sort(erase.rbegin(),erase.rend());
   for(auto pos:erase){remaining[pos]=remaining.back();remaining.pop_back();}
+  result.maintenance_ns+=now_ns()-m1;
  }
  return result;
 }
