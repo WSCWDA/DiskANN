@@ -3,6 +3,7 @@
 
 #include "common_includes.h"
 #include "qshape/baseline.h"
+#include "qshape/query_grouping.h"
 #include <boost/program_options.hpp>
 
 #include "index.h"
@@ -225,13 +226,21 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
         std::vector<qshape::Query> records(qshape::config().enabled ? query_num : 0);
         const auto arrival = qshape::config().enabled ? qshape::now_ns() : 0;
+        qshape::GroupingResult grouping;
+        const auto grouping_start = qshape::config().enabled ? qshape::now_ns() : 0;
+        if(qshape::config().enabled) {
+            const auto metric_name = metric == diskann::Metric::L2 ? "l2" : (metric == diskann::Metric::COSINE ? "cosine" : "mips");
+            grouping = qshape::group_queries(query,query_num,query_dim,query_aligned_dim,qshape::grouping_config(),metric_name);
+        }
+        const auto grouping_ns = qshape::config().enabled ? qshape::now_ns()-grouping_start : 0;
         auto s = std::chrono::high_resolution_clock::now();
 
 #pragma omp parallel for schedule(dynamic, 1)
-        for (int64_t i = 0; i < (int64_t)query_num; i++)
+        for (int64_t pos = 0; pos < (int64_t)query_num; pos++)
         {
+            const int64_t i = qshape::config().enabled ? grouping.order[pos] : pos;
             auto* record = qshape::config().enabled ? &records[i] : nullptr;
-            if(record) { record->id=i; record->thread=omp_get_thread_num(); }
+            if(record) { record->id=i; record->execution_id=pos; record->group_id=pos/qshape::grouping_config().group_size; record->thread=omp_get_thread_num(); }
             qshape::Scope scope(record);
             if (!filtered_search)
             {
@@ -260,7 +269,15 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto e = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = e - s;
         double qps = (1.0 * query_num) / (1.0 * diff.count());
-        if(qshape::config().enabled) qshape::write(records,qshape::config().prefix+"_L"+std::to_string(L)+"_run"+std::to_string(test_id),arrival,qshape::now_ns());
+        if(qshape::config().enabled) {
+            const auto finish=qshape::now_ns();
+            const auto prefix=qshape::config().prefix+"_L"+std::to_string(L)+"_run"+std::to_string(test_id);
+            qshape::write(records,prefix,arrival,finish);
+            std::ofstream out(prefix+"_grouping.csv");
+            out<<"policy,group_size,candidate_pool,seed,comparisons,grouping_ns,search_ns,e2e_ns,e2e_qps\n"
+               <<qshape::grouping_config().policy<<','<<qshape::grouping_config().group_size<<','<<qshape::grouping_config().candidate_pool<<','<<qshape::grouping_config().seed<<','<<grouping.comparisons<<','<<grouping_ns<<','<<static_cast<uint64_t>(diff.count()*1e9)<<','<<finish-arrival<<','<<query_num*1e9/(finish-arrival)<<'\n';
+            if(!out) throw std::runtime_error("grouping output failed");
+        }
 
         diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(), query_result_ids[test_id].data(),
                                                    query_num, recall_at);
@@ -386,6 +403,11 @@ int main(int argc, char **argv)
         optional_configs.add_options()("qshape-enable", po::value<bool>(&qshape::config().enabled)->default_value(false), "Enable P0 counters");
         optional_configs.add_options()("qshape-trace", po::value<bool>(&qshape::config().trace)->default_value(false), "Enable IO trace");
         optional_configs.add_options()("qshape-output-prefix", po::value<std::string>(&qshape::config().prefix)->default_value("qshape"), "Output prefix");
+        optional_configs.add_options()("qshape-grouping",po::value<std::string>(&qshape::grouping_config().policy)->default_value("original"),"original/random/similarity/oracle");
+        optional_configs.add_options()("qshape-group-size",po::value<uint32_t>(&qshape::grouping_config().group_size)->default_value(64),"Logical group size");
+        optional_configs.add_options()("qshape-candidate-pool",po::value<uint32_t>(&qshape::grouping_config().candidate_pool)->default_value(256),"Bounded candidate pool");
+        optional_configs.add_options()("qshape-seed",po::value<uint32_t>(&qshape::grouping_config().seed)->default_value(42),"Random seed");
+        optional_configs.add_options()("qshape-oracle-file",po::value<std::string>(&qshape::grouping_config().oracle_file)->default_value(""),"Offline evaluation permutation");
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
 
@@ -397,6 +419,11 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
+        const auto& gc=qshape::grouping_config();
+        if(gc.policy!="original" && gc.policy!="random" && gc.policy!="similarity" && gc.policy!="oracle") throw std::runtime_error("invalid grouping policy");
+        if(!gc.group_size || !gc.candidate_pool || (gc.policy=="similarity" && gc.candidate_pool<gc.group_size-1)) throw std::runtime_error("invalid grouping size/pool");
+        if(gc.policy!="original" && !qshape::config().enabled) throw std::runtime_error("grouping requires qshape-enable");
+        if(gc.policy=="oracle" && gc.oracle_file.empty()) throw std::runtime_error("oracle requires permutation file");
         if(qshape::config().trace && !qshape::config().enabled) throw std::runtime_error("trace requires qshape-enable");
 #ifdef _WINDOWS
         if(qshape::config().enabled) throw std::runtime_error("QShape P0 is Linux only");
