@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
+#include "qshape/baseline.h"
 #include "common_includes.h"
 
 #include "timer.h"
@@ -1432,6 +1433,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
             if (iter != _nhood_cache.end())
             {
                 cached_nhoods.push_back(std::make_pair(nbr.id, iter->second));
+                if(auto* q=qshape::current()) ++q->hits;
                 if (stats != nullptr)
                 {
                     stats->n_cache_hits++;
@@ -1460,6 +1462,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                 fnhood.second = sector_scratch + num_sectors_per_node * sector_scratch_idx * defaults::SECTOR_LEN;
                 sector_scratch_idx++;
                 frontier_nhoods.push_back(fnhood);
+                if(auto* q=qshape::current()) ++q->logical;
                 frontier_read_reqs.emplace_back(get_node_sector((size_t)id) * defaults::SECTOR_LEN,
                                                 num_sectors_per_node * defaults::SECTOR_LEN, fnhood.second);
                 if (stats != nullptr)

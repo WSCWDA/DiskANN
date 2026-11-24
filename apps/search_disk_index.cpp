@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 #include "common_includes.h"
+#include "qshape/baseline.h"
 #include <boost/program_options.hpp>
 
 #include "index.h"
@@ -222,11 +223,16 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto stats = new diskann::QueryStats[query_num];
 
         std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
+        std::vector<qshape::Query> records(qshape::config().enabled ? query_num : 0);
+        const auto arrival = qshape::config().enabled ? qshape::now_ns() : 0;
         auto s = std::chrono::high_resolution_clock::now();
 
 #pragma omp parallel for schedule(dynamic, 1)
         for (int64_t i = 0; i < (int64_t)query_num; i++)
         {
+            auto* record = qshape::config().enabled ? &records[i] : nullptr;
+            if(record) { record->id=i; record->thread=omp_get_thread_num(); }
+            qshape::Scope scope(record);
             if (!filtered_search)
             {
                 _pFlashIndex->cached_beam_search(query + (i * query_aligned_dim), recall_at, L,
@@ -254,6 +260,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
         auto e = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = e - s;
         double qps = (1.0 * query_num) / (1.0 * diff.count());
+        if(qshape::config().enabled) qshape::write(records,qshape::config().prefix+"_L"+std::to_string(L)+"_run"+std::to_string(test_id),arrival,qshape::now_ns());
 
         diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(), query_result_ids[test_id].data(),
                                                    query_num, recall_at);
@@ -376,6 +383,9 @@ int main(int argc, char **argv)
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
 
+        optional_configs.add_options()("qshape-enable", po::value<bool>(&qshape::config().enabled)->default_value(false), "Enable P0 counters");
+        optional_configs.add_options()("qshape-trace", po::value<bool>(&qshape::config().trace)->default_value(false), "Enable IO trace");
+        optional_configs.add_options()("qshape-output-prefix", po::value<std::string>(&qshape::config().prefix)->default_value("qshape"), "Output prefix");
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
 
@@ -387,6 +397,10 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
+        if(qshape::config().trace && !qshape::config().enabled) throw std::runtime_error("trace requires qshape-enable");
+#ifdef _WINDOWS
+        if(qshape::config().enabled) throw std::runtime_error("QShape P0 is Linux only");
+#endif
         if (vm["use_reorder_data"].as<bool>())
             use_reorder_data = true;
     }

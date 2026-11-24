@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 #include "linux_aligned_file_reader.h"
+#include "qshape/baseline.h"
 
 #include <cassert>
 #include <cstdio>
@@ -54,7 +55,17 @@ void execute_io(io_context_t ctx, int fd, std::vector<AlignedRead> &read_reqs, u
         while (n_tries <= n_retries)
         {
             // issue reads
+            auto* q=qshape::current();
+            const uint64_t first=q?q->next:0;
             int64_t ret = io_submit(ctx, (int64_t)n_ops, cbs.data());
+            if(q && ret>0) {
+                const auto t=qshape::config().trace?qshape::now_ns():0;
+                for(int64_t j=0;j<ret;++j) {
+                    const auto& req=read_reqs[iter*MAX_EVENTS+j];
+                    ++q->submitted; q->bytes+=req.len;
+                    q->event(q->next++,req.offset,req.len,"IO_SUBMIT",0,t);
+                }
+            }
             // if requests didn't get accepted
             if (ret != (int64_t)n_ops)
             {
@@ -76,6 +87,17 @@ void execute_io(io_context_t ctx, int fd, std::vector<AlignedRead> &read_reqs, u
                 }
                 else
                 {
+                    if(q) {
+                        const auto t=qshape::config().trace?qshape::now_ns():0;
+                        for(uint64_t j=0;j<n_ops;++j) {
+                            const auto idx=static_cast<uint64_t>(evts[j].obj-cb.data());
+                            const auto& req=read_reqs[iter*MAX_EVENTS+idx];
+                            const auto result=static_cast<int64_t>(evts[j].res);
+                            ++q->completed;
+                            if(result!=static_cast<int64_t>(req.len)||evts[j].res2!=0) ++q->errors;
+                            q->event(first+idx,req.offset,req.len,"IO_COMPLETE",result,t);
+                        }
+                    }
                     break;
                 }
             }
