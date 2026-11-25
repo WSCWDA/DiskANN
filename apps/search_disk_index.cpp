@@ -451,7 +451,10 @@ int main(int argc, char **argv)
             std::cout << desc;
             return 0;
         }
+        optional_configs.add_options()("qshape-breakdown",po::value<bool>(&qshape::config().breakdown)->default_value(false),"Owner/consumer timing");
+        optional_configs.add_options()("qshape-reuse-stats",po::value<bool>(&qshape::config().reuse_stats)->default_value(false),"Bounded post-publish reuse history");
         po::notify(vm);
+        if((qshape::config().breakdown||qshape::config().reuse_stats)&&!qshape::config().enabled)throw std::runtime_error("diagnostics require qshape-enable");
         if(qshape::config().hash_policy!="legacy"&&qshape::config().hash_policy!="mixed")throw std::runtime_error("invalid hash policy");
         if(qshape::config().shard_stats&&!qshape::config().enabled)throw std::runtime_error("shard stats requires qshape-enable");
         if(qshape::config().sharing!="off"&&qshape::config().sharing!="inflight")throw std::runtime_error("invalid sharing");

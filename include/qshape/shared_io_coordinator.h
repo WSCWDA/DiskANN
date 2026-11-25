@@ -7,6 +7,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <unordered_map>
 #include <algorithm>
@@ -26,13 +27,16 @@ struct Hash {
 struct Budget {std::atomic<uint64_t> used{0},peak{0};};
 struct SharedRequest {
  std::shared_ptr<Budget> budget;
- Key key; void* data=nullptr; uint64_t owner;
+ Key key; void* data=nullptr; uint64_t owner,group=0;
  std::mutex mu; std::condition_variable cv; bool ready=false; std::exception_ptr error;
  SharedRequest(std::shared_ptr<Budget> b,Key k,uint64_t o):budget(b),key(k),owner(o){}
  ~SharedRequest(){if(data){std::free(data);budget->used.fetch_sub(key.length);}}
 };
 class Coordinator {
- struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;};
+ // Direct-mapped, bounded history: 1024 entries per shard, no retained payload.
+ struct History {Key key{};uint64_t time=0,query=0,group=0;};
+ struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history;};
+ static size_t history_slot(Key k){return (Hash{}(k)>>6)%1024;}
  std::array<Shard,64> shards;
  std::shared_ptr<Budget> budget=std::make_shared<Budget>();
  static size_t shard_id(Key k){return Hash{}(k)%64;}
@@ -59,7 +63,22 @@ public:
  Ticket acquire(Key k,uint64_t qid,uint64_t limit){
   auto& sh=shard(k);auto* st=stats(k);TimedLock lock(sh.mu,st);if(st)++st->lookups;
   auto it=sh.map.find(k);if(it!=sh.map.end()){if(st)++st->joins;return {it->second,false};}
+  auto* q=current();
+  if(q&&config().reuse_stats){
+   ++q->reuse_lookups;
+   if(sh.history){
+    const auto& e=sh.history[history_slot(k)];
+    if(e.time&&e.key==k){
+     const auto gap=now_ns()-e.time;
+     ++q->reuse_hits;
+     if(e.query!=qid){++q->reuse_cross_query;if(e.group==q->group_id)++q->reuse_same_group;}
+     // Cap per-query samples; counters remain complete.
+     if(q->reuse.size()<4096)q->reuse.push_back({gap,k.offset,k.length,e.query,e.group});
+    }
+   }
+  }
   auto p=std::make_shared<SharedRequest>(budget,k,qid);
+  if(q)p->group=q->group_id;
   auto old=budget->used.load();
   do {if(!k.length||old>limit||k.length>limit-old)return {};}while(!budget->used.compare_exchange_weak(old,old+k.length));
   if(posix_memalign(&p->data,4096,k.length)!=0){p->data=nullptr;budget->used.fetch_sub(k.length);return {};}
@@ -70,12 +89,33 @@ public:
   auto& sh=shard(p->key);
   {auto* st=stats(p->key);TimedLock lock(sh.mu,st);if(st)++st->publishes;std::lock_guard<std::mutex> state(p->mu);
    auto it=sh.map.find(p->key);if(it==sh.map.end()||it->second!=p)std::terminate();
-   p->error=error;p->ready=true;sh.map.erase(it);}
+   p->error=error;p->ready=true;sh.map.erase(it);
+   if(!error&&config().reuse_stats){
+    // Diagnostic allocation must never prevent notification.
+    if(!sh.history)sh.history.reset(new(std::nothrow) History[1024]);
+    if(sh.history){
+     auto& e=sh.history[history_slot(p->key)];
+     if(auto* q=current())if(e.time&&!(e.key==p->key))++q->reuse_evictions;
+     e={p->key,now_ns(),p->owner,p->group};
+    }
+   }
+  }
   p->cv.notify_all();
  }
- void consume(const std::shared_ptr<SharedRequest>& p,void* dst){
-  {std::unique_lock<std::mutex> lock(p->mu);p->cv.wait(lock,[&]{return p->ready;});if(p->error)std::rethrow_exception(p->error);}
+ void consume(const std::shared_ptr<SharedRequest>& p,void* dst,bool owner=false){
+  auto* q=config().breakdown?current():nullptr;
+  const auto start=q?now_ns():0;
+  {std::unique_lock<std::mutex> lock(p->mu);
+   if(q&&!owner){if(p->ready)++q->ready_before_wait_count;else ++q->blocking_wait_count;}
+   p->cv.wait(lock,[&]{return p->ready;});if(p->error)std::rethrow_exception(p->error);}
+  const auto copy_start=q?now_ns():0;
   std::memcpy(dst,p->data,p->key.length);
+  if(q){
+   const auto end=now_ns();
+   if(owner){++q->owner_consumes;q->owner_wait_ns+=copy_start-start;q->owner_copy_ns+=end-copy_start;}
+   else{++q->consumer_consumes;q->consumer_wait_ns+=copy_start-start;q->consumer_copy_ns+=end-copy_start;}
+   q->copy_bytes+=p->key.length;
+  }
  }
 };
 }

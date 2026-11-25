@@ -244,14 +244,18 @@ void LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, io_contex
         }
         q->lookup_ns+=qshape::now_ns()-begin;
         q->peak_shared_bytes=std::max(q->peak_shared_bytes,coordinator.peak());
+        const auto io_start=qshape::config().breakdown?qshape::now_ns():0;
         execute_io(ctx,this->file_desc,owners);
+        if(qshape::config().breakdown)q->owner_io_ns+=qshape::now_ns()-io_start;
     } catch(...) {
         auto error=std::current_exception();
         for(auto& t:tickets)if(t.owner)coordinator.publish(t.req,error);
         throw;
     }
+    const auto publish_start=qshape::config().breakdown?qshape::now_ns():0;
     for(auto& t:tickets)if(t.owner)coordinator.publish(t.req);
+    if(qshape::config().breakdown)q->publish_ns+=qshape::now_ns()-publish_start;
     const auto begin=qshape::now_ns();
-    for(size_t i=0;i<tickets.size();++i)if(tickets[i].req)coordinator.consume(tickets[i].req,read_reqs[i].buf);
+    for(size_t i=0;i<tickets.size();++i)if(tickets[i].req)coordinator.consume(tickets[i].req,read_reqs[i].buf,tickets[i].owner);
     q->wait_copy_ns+=qshape::now_ns()-begin;
 }
