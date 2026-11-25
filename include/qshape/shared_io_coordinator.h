@@ -34,7 +34,7 @@ struct Budget {
 };
 struct SharedRequest {
  std::shared_ptr<Budget> budget;
- Key key; void* data=nullptr; uint64_t owner,group=0;
+ Key key; void* data=nullptr; uint64_t owner,group=0,life=0;
  std::mutex mu; std::condition_variable cv; bool ready=false,retained=false,independent=false; uint64_t published=0,ready_accesses=0; std::list<Key>::iterator lru_pos,expiry_pos; std::exception_ptr error;
  SharedRequest(std::shared_ptr<Budget> b,Key k,uint64_t o):budget(b),key(k),owner(o){}
  ~SharedRequest(){if(data){std::free(data);budget->used.fetch_sub(key.length);}}
@@ -63,6 +63,9 @@ class Coordinator {
  static ShardStats* stats(Key k){
   auto* q=current();return q&&config().shard_stats?&q->shards[shard_id(k)]:nullptr;
  }
+ static void record(const SharedRequest& p,const char* kind) noexcept {
+  if(config().region_trace)if(auto* q=current())q->region(p.key.offset,p.key.length,kind,p.owner,p.life);
+ }
  static bool ttl(){return config().retention=="ttl"||config().retention=="ttl-lru";}
  static bool lru(){return config().retention=="lru"||config().retention=="ttl-lru";}
  static bool dynamic(){return ttl()||lru();}
@@ -72,6 +75,7 @@ class Coordinator {
   auto it=sh.map.find(k);auto& p=*it->second;
   if(auto* q=current()){if(time)++q->ready_ttl_evictions;else ++q->ready_capacity_evictions;
    if(config().ready_stats){q->ready_unused_evictions+=p.ready_accesses==0;q->ready_eviction_age_ns+=now-p.published;}}
+  record(p,time?"EVICT_TTL":"EVICT_CAPACITY");
   sh.lru.erase(p.lru_pos);sh.expiry.erase(p.expiry_pos);
   sh.ready_bytes-=k.length;budget->ready.fetch_sub(k.length);sh.map.erase(it);
  }
@@ -122,6 +126,7 @@ public:
      if(p.owner!=qid){++diag->ready_cross_query_hits;if(p.group==diag->group_id)++diag->ready_same_group_hits;else ++diag->ready_cross_group_hits;}}
    }
    if(diag)diag->ready_retention_ns+=now_ns()-begin;
+   record(p,p.retained?"READY_HIT":"INFLIGHT_JOIN");
    if(st)++st->joins;return {it->second,false,p.retained};
   }
   if(diag)diag->ready_retention_ns+=now_ns()-begin;
@@ -150,6 +155,8 @@ public:
   Budget::high(budget->inflight_peak,budget->inflight.load());
   if(posix_memalign(&p->data,4096,k.length)!=0){p->data=nullptr;budget->used.fetch_sub(k.length);budget->inflight.fetch_sub(k.length);return {};}
   try{if(share)sh.map.emplace(k,p);}catch(...){budget->inflight.fetch_sub(k.length);throw;}
+  if(config().region_trace&&q)p->life=++q->region_next;
+  record(*p,"OWNER");
   if(st)++st->owners;return {p,true};
  }
  void publish(const std::shared_ptr<SharedRequest>& p,std::exception_ptr error={}){
@@ -164,10 +171,12 @@ public:
    }
    const bool registered=it!=sh.map.end()&&it->second==p;
    p->error=error;p->ready=true;
+   record(*p,error?"PUBLISH_ERROR":"PUBLISH");
    if(!error&&config().retention!="none"){
     auto* diag=config().ready_stats?current():nullptr;const auto begin=diag?now_ns():0;
     p->published=now_ns();p->retained=registered&&admit(sh,p);
     if(diag)diag->ready_retention_ns+=now_ns()-begin;
+    record(*p,p->retained?"ADMIT":"REJECT");
     if(p->retained){Budget::high(budget->ready_peak,budget->ready.load());if(auto* q=current())++q->ready_admissions;}
     else if(auto* q=current())++q->ready_rejects;
    }

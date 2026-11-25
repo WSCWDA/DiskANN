@@ -1,0 +1,3 @@
+# D3 region diagnostics
+
+Opt-in per-query bounded event vectors. OWNER/JOIN/HIT/BYPASS partition logical accesses. Lifecycle key (owner_query,lifecycle), scoped to one search/file. Publication is software publication, not device completion. Final resident set reconstructed from admissions minus evictions; no independent snapshot. Validator requires zero drops, ready stats on, sharing inflight, retention enabled. Diagnostic timings not formal performance. Run six cases x three repeats with run_region_diagnostics.sh; validate_regions.py --out PATH. Region summaries are per-run; raw events retained for later temporal analysis. No policy replay yet.

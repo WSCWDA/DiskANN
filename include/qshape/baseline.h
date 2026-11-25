@@ -8,12 +8,20 @@
 #include <vector>
 namespace qshape {
 inline uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-struct Config { bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false, breakdown=false, reuse_stats=false; uint64_t inflight_budget=67108864; std::string retention="none"; uint64_t ready_budget=16777216, ready_ttl_us=5000; bool ready_stats=false; std::string prefix="qshape"; };
+struct Config { bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false, breakdown=false, reuse_stats=false; uint64_t inflight_budget=67108864; std::string retention="none"; uint64_t ready_budget=16777216, ready_ttl_us=5000; bool ready_stats=false, region_trace=false; uint64_t region_event_limit=4096; std::string prefix="qshape"; };
 inline Config& config() { static Config c; return c; }
 struct Event { uint64_t id, offset, length, time; int64_t result; const char* kind; };
 struct ShardStats {uint64_t lookups=0,owners=0,joins=0,publishes=0,wait_ns=0,hold_ns=0;};
 struct ReuseSample {uint64_t gap,offset,length,previous_query,previous_group;};
+struct RegionEvent {uint64_t offset,length,time,owner,life; const char* kind;};
 struct Query {
+ uint64_t region_next=0,region_dropped=0;
+ std::vector<RegionEvent> regions;
+ void region(uint64_t off,uint64_t len,const char* kind,uint64_t owner,uint64_t life) noexcept {
+  if(!config().region_trace)return;
+  if(regions.size()>=config().region_event_limit){++region_dropped;return;}
+  try{regions.push_back({off,len,now_ns(),owner,life,kind});}catch(...){++region_dropped;}
+ }
  uint64_t ready_ttl_evictions=0,ready_capacity_evictions=0,ready_unused_evictions=0,ready_cross_query_hits=0,ready_same_group_hits=0,ready_cross_group_hits=0,ready_hit_age_ns=0,ready_eviction_age_ns=0,ready_retention_ns=0;
  uint64_t ready_hits=0,ready_hit_bytes=0,ready_admissions=0,ready_rejects=0,peak_ready_bytes=0,peak_inflight_bytes=0;
  uint64_t owner_io_ns=0,publish_ns=0,owner_wait_ns=0,consumer_wait_ns=0,owner_copy_ns=0,consumer_copy_ns=0,copy_bytes=0,owner_consumes=0,consumer_consumes=0,ready_before_wait_count=0,blocking_wait_count=0,reuse_lookups=0,reuse_hits=0,reuse_cross_query=0,reuse_same_group=0,reuse_evictions=0;
@@ -64,6 +72,17 @@ inline void write(const std::vector<Query>& qs,const std::string& prefix,uint64_
    shard<<i<<','<<t.lookups<<','<<t.owners<<','<<t.joins<<','<<t.publishes<<','<<t.wait_ns<<','<<t.hold_ns<<'\n';
   }
   if(!shard)throw std::runtime_error("shard output failed");
+ }
+ if(config().region_trace){
+  std::ofstream f(prefix+"_regions.csv"), m(prefix+"_region_meta.csv");
+  f<<"query_id,group_id,sequence,offset,length,timestamp_ns,owner_query,lifecycle,event_type\n";
+  m<<"query_id,events,dropped\n";
+  for(const auto& q:qs){
+   m<<q.id<<','<<q.regions.size()<<','<<q.region_dropped<<'\n';
+   uint64_t seq=0;
+   for(const auto& e:q.regions)f<<q.id<<','<<q.group_id<<','<<seq++<<','<<e.offset<<','<<e.length<<','<<e.time<<','<<e.owner<<','<<e.life<<','<<e.kind<<'\n';
+  }
+  if(!f||!m)throw std::runtime_error("region output failed");
  }
  if(config().trace) {
   std::ofstream io(prefix+"_io.csv");

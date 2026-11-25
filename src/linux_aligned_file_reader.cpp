@@ -240,7 +240,7 @@ void LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, io_contex
         for(const auto& r:read_reqs){
             auto t=coordinator.acquire({r.offset,r.len},q->id,qshape::config().inflight_budget,qshape::config().sharing=="inflight");
             tickets.push_back(t);
-            if(!t.req){++q->bypass;owners.push_back(r);}
+            if(!t.req){++q->bypass; q->region(r.offset,r.len,"BYPASS",q->id,0);owners.push_back(r);}
             else if(t.owner)owners.emplace_back(r.offset,r.len,t.req->data);
             else {++q->shared_hits;q->shared_bytes+=r.len;if(t.req->owner==q->id)++q->same_query_hits;if(t.ready_hit){++q->ready_hits;q->ready_hit_bytes+=r.len;}}
         }
