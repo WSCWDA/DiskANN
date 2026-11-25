@@ -441,6 +441,8 @@ int main(int argc, char **argv)
         optional_configs.add_options()("qshape-oracle-file",po::value<std::string>(&qshape::grouping_config().oracle_file)->default_value(""),"Offline evaluation permutation");
         optional_configs.add_options()("qshape-scheduler",po::value<std::string>(&qshape::scheduler_config().policy)->default_value("reorder"),"reorder/group-aware");
         optional_configs.add_options()("qshape-lookahead",po::value<uint32_t>(&qshape::scheduler_config().lookahead)->default_value(4),"Pending group lookahead");
+        optional_configs.add_options()("qshape-breakdown",po::value<bool>(&qshape::config().breakdown)->default_value(false),"Owner/consumer timing");
+        optional_configs.add_options()("qshape-reuse-stats",po::value<bool>(&qshape::config().reuse_stats)->default_value(false),"Bounded post-publish reuse history");
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
 
@@ -451,8 +453,6 @@ int main(int argc, char **argv)
             std::cout << desc;
             return 0;
         }
-        optional_configs.add_options()("qshape-breakdown",po::value<bool>(&qshape::config().breakdown)->default_value(false),"Owner/consumer timing");
-        optional_configs.add_options()("qshape-reuse-stats",po::value<bool>(&qshape::config().reuse_stats)->default_value(false),"Bounded post-publish reuse history");
         po::notify(vm);
         if((qshape::config().breakdown||qshape::config().reuse_stats)&&!qshape::config().enabled)throw std::runtime_error("diagnostics require qshape-enable");
         if(qshape::config().hash_policy!="legacy"&&qshape::config().hash_policy!="mixed")throw std::runtime_error("invalid hash policy");
