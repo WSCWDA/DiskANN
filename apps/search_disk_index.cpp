@@ -443,6 +443,8 @@ int main(int argc, char **argv)
         optional_configs.add_options()("qshape-lookahead",po::value<uint32_t>(&qshape::scheduler_config().lookahead)->default_value(4),"Pending group lookahead");
         optional_configs.add_options()("qshape-breakdown",po::value<bool>(&qshape::config().breakdown)->default_value(false),"Owner/consumer timing");
         optional_configs.add_options()("qshape-reuse-stats",po::value<bool>(&qshape::config().reuse_stats)->default_value(false),"Bounded post-publish reuse history");
+        optional_configs.add_options()("qshape-retention",po::value<std::string>(&qshape::config().retention)->default_value("none"),"none/bounded (P3.1-A)");
+        optional_configs.add_options()("qshape-ready-budget",po::value<uint64_t>(&qshape::config().ready_budget)->default_value(16777216),"READY payload byte budget");
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
 
@@ -454,6 +456,9 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
+        const auto& rc=qshape::config();
+        if(rc.retention!="none"&&rc.retention!="bounded")throw std::runtime_error("invalid retention");
+        if(rc.retention=="bounded"&&(!rc.enabled||rc.sharing!="inflight"||!rc.ready_budget||rc.ready_budget>UINT64_MAX-rc.inflight_budget||rc.breakdown||rc.reuse_stats||Lvec.size()!=1))throw std::runtime_error("bounded retention requires enabled inflight, positive budget, single L and diagnostics off");
         if((qshape::config().breakdown||qshape::config().reuse_stats)&&!qshape::config().enabled)throw std::runtime_error("diagnostics require qshape-enable");
         if(qshape::config().hash_policy!="legacy"&&qshape::config().hash_policy!="mixed")throw std::runtime_error("invalid hash policy");
         if(qshape::config().shard_stats&&!qshape::config().enabled)throw std::runtime_error("shard stats requires qshape-enable");

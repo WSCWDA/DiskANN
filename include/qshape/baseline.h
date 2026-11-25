@@ -8,12 +8,13 @@
 #include <vector>
 namespace qshape {
 inline uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-struct Config { bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false, breakdown=false, reuse_stats=false; uint64_t inflight_budget=67108864; std::string prefix="qshape"; };
+struct Config { bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false, breakdown=false, reuse_stats=false; uint64_t inflight_budget=67108864; std::string retention="none"; uint64_t ready_budget=16777216; std::string prefix="qshape"; };
 inline Config& config() { static Config c; return c; }
 struct Event { uint64_t id, offset, length, time; int64_t result; const char* kind; };
 struct ShardStats {uint64_t lookups=0,owners=0,joins=0,publishes=0,wait_ns=0,hold_ns=0;};
 struct ReuseSample {uint64_t gap,offset,length,previous_query,previous_group;};
 struct Query {
+ uint64_t ready_hits=0,ready_hit_bytes=0,ready_admissions=0,ready_rejects=0,peak_ready_bytes=0,peak_inflight_bytes=0;
  uint64_t owner_io_ns=0,publish_ns=0,owner_wait_ns=0,consumer_wait_ns=0,owner_copy_ns=0,consumer_copy_ns=0,copy_bytes=0,owner_consumes=0,consumer_consumes=0,ready_before_wait_count=0,blocking_wait_count=0,reuse_lookups=0,reuse_hits=0,reuse_cross_query=0,reuse_same_group=0,reuse_evictions=0;
  std::vector<ReuseSample> reuse;
  std::array<ShardStats,64> shards{};
@@ -34,10 +35,10 @@ struct Scope {
 };
 inline void write(const std::vector<Query>& qs,const std::string& prefix,uint64_t arrival,uint64_t finish) {
  std::ofstream out(prefix+"_queries.csv"), summary(prefix+"_summary.csv");
- out<<"query_id,execution_id,group_id,thread_id,arrival_ns,search_start_ns,search_end_ns,logical_node_reads,static_cache_hits,submitted_reads,submitted_bytes,completed_reads,completion_errors,dispatch_ns,scheduler_ns,reader_requests,reader_bytes,shared_hits,shared_bytes,same_query_hits,bypass,lookup_ns,wait_copy_ns,peak_shared_bytes\n";
+ out<<"query_id,execution_id,group_id,thread_id,arrival_ns,search_start_ns,search_end_ns,logical_node_reads,static_cache_hits,submitted_reads,submitted_bytes,completed_reads,completion_errors,dispatch_ns,scheduler_ns,reader_requests,reader_bytes,shared_hits,shared_bytes,same_query_hits,bypass,lookup_ns,wait_copy_ns,peak_shared_bytes,ready_hits,ready_hit_bytes,ready_admissions,ready_rejects,peak_ready_bytes,peak_inflight_bytes\n";
  uint64_t reads=0,bytes=0,errors=0,logical=0,hits=0;
  for(const auto& q:qs) {
-  out<<q.id<<','<<q.execution_id<<','<<q.group_id<<','<<q.thread<<','<<arrival<<','<<q.start<<','<<q.end<<','<<q.logical<<','<<q.hits<<','<<q.submitted<<','<<q.bytes<<','<<q.completed<<','<<q.errors<<','<<q.dispatch_ns<<','<<q.scheduler_ns<<','<<q.reader_requests<<','<<q.reader_bytes<<','<<q.shared_hits<<','<<q.shared_bytes<<','<<q.same_query_hits<<','<<q.bypass<<','<<q.lookup_ns<<','<<q.wait_copy_ns<<','<<q.peak_shared_bytes<<'\n';
+  out<<q.id<<','<<q.execution_id<<','<<q.group_id<<','<<q.thread<<','<<arrival<<','<<q.start<<','<<q.end<<','<<q.logical<<','<<q.hits<<','<<q.submitted<<','<<q.bytes<<','<<q.completed<<','<<q.errors<<','<<q.dispatch_ns<<','<<q.scheduler_ns<<','<<q.reader_requests<<','<<q.reader_bytes<<','<<q.shared_hits<<','<<q.shared_bytes<<','<<q.same_query_hits<<','<<q.bypass<<','<<q.lookup_ns<<','<<q.wait_copy_ns<<','<<q.peak_shared_bytes<<','<<q.ready_hits<<','<<q.ready_hit_bytes<<','<<q.ready_admissions<<','<<q.ready_rejects<<','<<q.peak_ready_bytes<<','<<q.peak_inflight_bytes<<'\n';
   reads+=q.submitted;bytes+=q.bytes;errors+=q.errors;logical+=q.logical;hits+=q.hits;
  }
  summary<<"queries,elapsed_ns,logical_node_reads,static_cache_hits,submitted_reads,submitted_bytes,completion_errors\n"<<qs.size()<<','<<finish-arrival<<','<<logical<<','<<hits<<','<<reads<<','<<bytes<<','<<errors<<'\n';

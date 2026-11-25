@@ -201,6 +201,7 @@ void LinuxAlignedFileReader::deregister_all_threads()
 
 void LinuxAlignedFileReader::open(const std::string &fname)
 {
+    coordinator.clear_ready();
     int flags = O_DIRECT | O_RDONLY | O_LARGEFILE;
     this->file_desc = ::open(fname.c_str(), flags);
     // error checks
@@ -216,6 +217,7 @@ void LinuxAlignedFileReader::close()
     ::fcntl(this->file_desc, F_GETFD);
     //  assert(ret != -1);
 
+    coordinator.clear_ready();
     ::close(this->file_desc);
     //  assert(ret != -1);
 }
@@ -240,7 +242,7 @@ void LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, io_contex
             tickets.push_back(t);
             if(!t.req){++q->bypass;owners.push_back(r);}
             else if(t.owner)owners.emplace_back(r.offset,r.len,t.req->data);
-            else {++q->shared_hits;q->shared_bytes+=r.len;if(t.req->owner==q->id)++q->same_query_hits;}
+            else {++q->shared_hits;q->shared_bytes+=r.len;if(t.req->owner==q->id)++q->same_query_hits;if(t.ready_hit){++q->ready_hits;q->ready_hit_bytes+=r.len;}}
         }
         q->lookup_ns+=qshape::now_ns()-begin;
         q->peak_shared_bytes=std::max(q->peak_shared_bytes,coordinator.peak());
@@ -258,4 +260,7 @@ void LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, io_contex
     const auto begin=qshape::now_ns();
     for(size_t i=0;i<tickets.size();++i)if(tickets[i].req)coordinator.consume(tickets[i].req,read_reqs[i].buf,tickets[i].owner);
     q->wait_copy_ns+=qshape::now_ns()-begin;
+    q->peak_shared_bytes=std::max(q->peak_shared_bytes,coordinator.peak());
+    q->peak_ready_bytes=std::max(q->peak_ready_bytes,coordinator.ready_peak());
+    q->peak_inflight_bytes=std::max(q->peak_inflight_bytes,coordinator.inflight_peak());
 }

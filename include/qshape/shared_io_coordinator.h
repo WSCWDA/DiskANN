@@ -24,11 +24,17 @@ struct Hash {
   return static_cast<size_t>(mix(k.offset)^mix(k.length+0x9e3779b97f4a7c15ULL));
  }
 };
-struct Budget {std::atomic<uint64_t> used{0},peak{0};};
+struct Budget {
+ std::atomic<uint64_t> used{0},peak{0},inflight{0},inflight_peak{0},ready{0},ready_peak{0};
+ static bool reserve(std::atomic<uint64_t>& n,uint64_t size,uint64_t limit){
+  auto old=n.load();do{if(!size||old>limit||size>limit-old)return false;}while(!n.compare_exchange_weak(old,old+size));return true;
+ }
+ static void high(std::atomic<uint64_t>& p,uint64_t n){auto old=p.load();while(old<n&&!p.compare_exchange_weak(old,n)){}}
+};
 struct SharedRequest {
  std::shared_ptr<Budget> budget;
  Key key; void* data=nullptr; uint64_t owner,group=0;
- std::mutex mu; std::condition_variable cv; bool ready=false; std::exception_ptr error;
+ std::mutex mu; std::condition_variable cv; bool ready=false,retained=false; std::exception_ptr error;
  SharedRequest(std::shared_ptr<Budget> b,Key k,uint64_t o):budget(b),key(k),owner(o){}
  ~SharedRequest(){if(data){std::free(data);budget->used.fetch_sub(key.length);}}
 };
@@ -57,12 +63,25 @@ class Coordinator {
   auto* q=current();return q&&config().shard_stats?&q->shards[shard_id(k)]:nullptr;
  }
 public:
- struct Ticket {std::shared_ptr<SharedRequest> req;bool owner=false;};
+ struct Ticket {std::shared_ptr<SharedRequest> req;bool owner=false;bool ready_hit=false;};
  uint64_t used()const{return budget->used.load();}
  uint64_t peak()const{return budget->peak.load();}
+ uint64_t ready_used()const{return budget->ready.load();}
+ uint64_t ready_peak()const{return budget->ready_peak.load();}
+ uint64_t inflight_peak()const{return budget->inflight_peak.load();}
+ // Only at quiescent file lifecycle boundaries; outstanding tickets remain valid.
+ void clear_ready(){
+  for(auto& sh:shards){std::lock_guard<std::mutex> lock(sh.mu);
+   for(auto it=sh.map.begin();it!=sh.map.end();){
+    if(!it->second->retained){++it;continue;}
+    budget->ready.fetch_sub(it->first.length);it=sh.map.erase(it);
+   }
+   sh.history.reset();
+  }
+ }
  Ticket acquire(Key k,uint64_t qid,uint64_t limit){
   auto& sh=shard(k);auto* st=stats(k);TimedLock lock(sh.mu,st);if(st)++st->lookups;
-  auto it=sh.map.find(k);if(it!=sh.map.end()){if(st)++st->joins;return {it->second,false};}
+  auto it=sh.map.find(k);if(it!=sh.map.end()){if(st)++st->joins;return {it->second,false,it->second->retained};}
   auto* q=current();
   if(q&&config().reuse_stats){
    ++q->reuse_lookups;
@@ -79,17 +98,28 @@ public:
   }
   auto p=std::make_shared<SharedRequest>(budget,k,qid);
   if(q)p->group=q->group_id;
-  auto old=budget->used.load();
-  do {if(!k.length||old>limit||k.length>limit-old)return {};}while(!budget->used.compare_exchange_weak(old,old+k.length));
-  if(posix_memalign(&p->data,4096,k.length)!=0){p->data=nullptr;budget->used.fetch_sub(k.length);return {};}
-  auto peak=budget->peak.load();while(peak<old+k.length&&!budget->peak.compare_exchange_weak(peak,old+k.length)){}
-  sh.map.emplace(k,p);if(st)++st->owners;return {p,true};
+  const auto extra=config().retention=="bounded"?config().ready_budget:0;
+  if(extra>UINT64_MAX-limit)return {};
+  if(!Budget::reserve(budget->inflight,k.length,limit))return {};
+  if(!Budget::reserve(budget->used,k.length,limit+extra)){budget->inflight.fetch_sub(k.length);return {};}
+  Budget::high(budget->peak,budget->used.load());
+  Budget::high(budget->inflight_peak,budget->inflight.load());
+  if(posix_memalign(&p->data,4096,k.length)!=0){p->data=nullptr;budget->used.fetch_sub(k.length);budget->inflight.fetch_sub(k.length);return {};}
+  try{sh.map.emplace(k,p);}catch(...){budget->inflight.fetch_sub(k.length);throw;}
+  if(st)++st->owners;return {p,true};
  }
  void publish(const std::shared_ptr<SharedRequest>& p,std::exception_ptr error={}){
   auto& sh=shard(p->key);
   {auto* st=stats(p->key);TimedLock lock(sh.mu,st);if(st)++st->publishes;std::lock_guard<std::mutex> state(p->mu);
    auto it=sh.map.find(p->key);if(it==sh.map.end()||it->second!=p)std::terminate();
-   p->error=error;p->ready=true;sh.map.erase(it);
+   p->error=error;p->ready=true;
+   if(!error&&config().retention=="bounded"){
+    p->retained=Budget::reserve(budget->ready,p->key.length,config().ready_budget);
+    if(p->retained){Budget::high(budget->ready_peak,budget->ready.load());if(auto* q=current())++q->ready_admissions;}
+    else if(auto* q=current())++q->ready_rejects;
+   }
+   budget->inflight.fetch_sub(p->key.length);
+   if(!p->retained)sh.map.erase(it);
    if(!error&&config().reuse_stats){
     // Diagnostic allocation must never prevent notification.
     if(!sh.history)sh.history.reset(new(std::nothrow) History[1024]);
