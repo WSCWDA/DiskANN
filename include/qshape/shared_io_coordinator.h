@@ -11,6 +11,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <algorithm>
+#include <list>
 namespace qshape {
 struct Key {uint64_t offset,length; bool operator==(const Key& k)const{return offset==k.offset&&length==k.length;}};
 struct Hash {
@@ -34,14 +35,14 @@ struct Budget {
 struct SharedRequest {
  std::shared_ptr<Budget> budget;
  Key key; void* data=nullptr; uint64_t owner,group=0;
- std::mutex mu; std::condition_variable cv; bool ready=false,retained=false; std::exception_ptr error;
+ std::mutex mu; std::condition_variable cv; bool ready=false,retained=false; uint64_t published=0,ready_accesses=0; std::list<Key>::iterator lru_pos,expiry_pos; std::exception_ptr error;
  SharedRequest(std::shared_ptr<Budget> b,Key k,uint64_t o):budget(b),key(k),owner(o){}
  ~SharedRequest(){if(data){std::free(data);budget->used.fetch_sub(key.length);}}
 };
 class Coordinator {
  // Direct-mapped, bounded history: 1024 entries per shard, no retained payload.
  struct History {Key key{};uint64_t time=0,query=0,group=0;};
- struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history;};
+ struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
  static size_t history_slot(Key k){return (Hash{}(k)>>6)%1024;}
  std::array<Shard,64> shards;
  std::shared_ptr<Budget> budget=std::make_shared<Budget>();
@@ -62,6 +63,35 @@ class Coordinator {
  static ShardStats* stats(Key k){
   auto* q=current();return q&&config().shard_stats?&q->shards[shard_id(k)]:nullptr;
  }
+ static bool ttl(){return config().retention=="ttl"||config().retention=="ttl-lru";}
+ static bool lru(){return config().retention=="lru"||config().retention=="ttl-lru";}
+ static bool dynamic(){return ttl()||lru();}
+ static bool expired(const SharedRequest& p,uint64_t now){return ttl()&&(now-p.published)/1000>=config().ready_ttl_us;}
+ // All list/map operations under the owning shard lock. No cross-shard locking.
+ void evict(Shard& sh,Key k,bool time,uint64_t now){
+  auto it=sh.map.find(k);auto& p=*it->second;
+  if(auto* q=current()){if(time)++q->ready_ttl_evictions;else ++q->ready_capacity_evictions;
+   if(config().ready_stats){q->ready_unused_evictions+=p.ready_accesses==0;q->ready_eviction_age_ns+=now-p.published;}}
+  sh.lru.erase(p.lru_pos);sh.expiry.erase(p.expiry_pos);
+  sh.ready_bytes-=k.length;budget->ready.fetch_sub(k.length);sh.map.erase(it);
+ }
+ void purge(Shard& sh,uint64_t now){
+  while(ttl()&&!sh.expiry.empty()){
+   auto k=sh.expiry.front();if(!expired(*sh.map.at(k),now))break;evict(sh,k,true,now);
+  }
+ }
+ bool admit(Shard& sh,const std::shared_ptr<SharedRequest>& p){
+  if(!dynamic())return Budget::reserve(budget->ready,p->key.length,config().ready_budget);
+  const auto now=now_ns();p->published=now;purge(sh,now);
+  const auto cap=config().ready_budget/64+(shard_id(p->key)<config().ready_budget%64?1:0);
+  if(p->key.length>cap)return false;
+  while(lru()&&sh.ready_bytes>cap-p->key.length&&!sh.lru.empty())evict(sh,sh.lru.front(),false,now);
+  if(sh.ready_bytes>cap-p->key.length)return false;
+  // Allocation failure rejects retention without preventing I/O publication.
+  try{sh.lru.push_back(p->key);try{sh.expiry.push_back(p->key);}catch(...){sh.lru.pop_back();return false;}}catch(...){return false;}
+  if(!Budget::reserve(budget->ready,p->key.length,config().ready_budget)){sh.lru.pop_back();sh.expiry.pop_back();return false;}
+  p->lru_pos=std::prev(sh.lru.end());p->expiry_pos=std::prev(sh.expiry.end());sh.ready_bytes+=p->key.length;return true;
+ }
 public:
  struct Ticket {std::shared_ptr<SharedRequest> req;bool owner=false;bool ready_hit=false;};
  uint64_t used()const{return budget->used.load();}
@@ -76,12 +106,25 @@ public:
     if(!it->second->retained){++it;continue;}
     budget->ready.fetch_sub(it->first.length);it=sh.map.erase(it);
    }
-   sh.history.reset();
+   sh.history.reset();sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
   }
  }
  Ticket acquire(Key k,uint64_t qid,uint64_t limit){
   auto& sh=shard(k);auto* st=stats(k);TimedLock lock(sh.mu,st);if(st)++st->lookups;
-  auto it=sh.map.find(k);if(it!=sh.map.end()){if(st)++st->joins;return {it->second,false,it->second->retained};}
+  auto* diag=config().ready_stats?current():nullptr;
+  const auto begin=diag?now_ns():0;
+  if(ttl())purge(sh,now_ns());
+  auto it=sh.map.find(k);if(it!=sh.map.end()){
+   auto& p=*it->second;
+   if(p.retained){
+    if(lru())sh.lru.splice(sh.lru.end(),sh.lru,p.lru_pos);
+    if(diag){++p.ready_accesses;diag->ready_hit_age_ns+=now_ns()-p.published;
+     if(p.owner!=qid){++diag->ready_cross_query_hits;if(p.group==diag->group_id)++diag->ready_same_group_hits;else ++diag->ready_cross_group_hits;}}
+   }
+   if(diag)diag->ready_retention_ns+=now_ns()-begin;
+   if(st)++st->joins;return {it->second,false,p.retained};
+  }
+  if(diag)diag->ready_retention_ns+=now_ns()-begin;
   auto* q=current();
   if(q&&config().reuse_stats){
    ++q->reuse_lookups;
@@ -98,7 +141,7 @@ public:
   }
   auto p=std::make_shared<SharedRequest>(budget,k,qid);
   if(q)p->group=q->group_id;
-  const auto extra=config().retention=="bounded"?config().ready_budget:0;
+  const auto extra=config().retention!="none"?config().ready_budget:0;
   if(extra>UINT64_MAX-limit)return {};
   if(!Budget::reserve(budget->inflight,k.length,limit))return {};
   if(!Budget::reserve(budget->used,k.length,limit+extra)){budget->inflight.fetch_sub(k.length);return {};}
@@ -113,8 +156,10 @@ public:
   {auto* st=stats(p->key);TimedLock lock(sh.mu,st);if(st)++st->publishes;std::lock_guard<std::mutex> state(p->mu);
    auto it=sh.map.find(p->key);if(it==sh.map.end()||it->second!=p)std::terminate();
    p->error=error;p->ready=true;
-   if(!error&&config().retention=="bounded"){
-    p->retained=Budget::reserve(budget->ready,p->key.length,config().ready_budget);
+   if(!error&&config().retention!="none"){
+    auto* diag=config().ready_stats?current():nullptr;const auto begin=diag?now_ns():0;
+    p->published=now_ns();p->retained=admit(sh,p);
+    if(diag)diag->ready_retention_ns+=now_ns()-begin;
     if(p->retained){Budget::high(budget->ready_peak,budget->ready.load());if(auto* q=current())++q->ready_admissions;}
     else if(auto* q=current())++q->ready_rejects;
    }
