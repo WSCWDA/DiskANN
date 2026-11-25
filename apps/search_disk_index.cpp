@@ -460,7 +460,7 @@ int main(int argc, char **argv)
         const auto& rc=qshape::config();
         if(rc.retention!="none"&&rc.retention!="bounded"&&rc.retention!="ttl"&&rc.retention!="lru"&&rc.retention!="ttl-lru")throw std::runtime_error("invalid retention");
         if(!rc.ready_ttl_us)throw std::runtime_error("TTL must be positive");
-        if(rc.retention!="none"&&(!rc.enabled||rc.sharing!="inflight"||!rc.ready_budget||rc.ready_budget>UINT64_MAX-rc.inflight_budget||rc.reuse_stats||Lvec.size()!=1))throw std::runtime_error("retention requires enabled inflight, positive budget, single L and reuse history off");
+        if(rc.retention!="none"&&(!rc.enabled||!rc.ready_budget||rc.ready_budget>UINT64_MAX-rc.inflight_budget||rc.reuse_stats||Lvec.size()!=1))throw std::runtime_error("retention requires qshape-enable, positive budget, single L and reuse history off");
         if((qshape::config().breakdown||qshape::config().reuse_stats)&&!qshape::config().enabled)throw std::runtime_error("diagnostics require qshape-enable");
         if(qshape::config().hash_policy!="legacy"&&qshape::config().hash_policy!="mixed")throw std::runtime_error("invalid hash policy");
         if(qshape::config().shard_stats&&!qshape::config().enabled)throw std::runtime_error("shard stats requires qshape-enable");

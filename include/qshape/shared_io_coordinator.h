@@ -35,7 +35,7 @@ struct Budget {
 struct SharedRequest {
  std::shared_ptr<Budget> budget;
  Key key; void* data=nullptr; uint64_t owner,group=0;
- std::mutex mu; std::condition_variable cv; bool ready=false,retained=false; uint64_t published=0,ready_accesses=0; std::list<Key>::iterator lru_pos,expiry_pos; std::exception_ptr error;
+ std::mutex mu; std::condition_variable cv; bool ready=false,retained=false,independent=false; uint64_t published=0,ready_accesses=0; std::list<Key>::iterator lru_pos,expiry_pos; std::exception_ptr error;
  SharedRequest(std::shared_ptr<Budget> b,Key k,uint64_t o):budget(b),key(k),owner(o){}
  ~SharedRequest(){if(data){std::free(data);budget->used.fetch_sub(key.length);}}
 };
@@ -109,12 +109,12 @@ public:
    sh.history.reset();sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
   }
  }
- Ticket acquire(Key k,uint64_t qid,uint64_t limit){
+ Ticket acquire(Key k,uint64_t qid,uint64_t limit,bool share=true){
   auto& sh=shard(k);auto* st=stats(k);TimedLock lock(sh.mu,st);if(st)++st->lookups;
   auto* diag=config().ready_stats?current():nullptr;
   const auto begin=diag?now_ns():0;
   if(ttl())purge(sh,now_ns());
-  auto it=sh.map.find(k);if(it!=sh.map.end()){
+  auto it=sh.map.find(k);if(it!=sh.map.end()&&(share||it->second->retained)){
    auto& p=*it->second;
    if(p.retained){
     if(lru())sh.lru.splice(sh.lru.end(),sh.lru,p.lru_pos);
@@ -141,6 +141,7 @@ public:
   }
   auto p=std::make_shared<SharedRequest>(budget,k,qid);
   if(q)p->group=q->group_id;
+  p->independent=!share;
   const auto extra=config().retention!="none"?config().ready_budget:0;
   if(extra>UINT64_MAX-limit)return {};
   if(!Budget::reserve(budget->inflight,k.length,limit))return {};
@@ -148,23 +149,30 @@ public:
   Budget::high(budget->peak,budget->used.load());
   Budget::high(budget->inflight_peak,budget->inflight.load());
   if(posix_memalign(&p->data,4096,k.length)!=0){p->data=nullptr;budget->used.fetch_sub(k.length);budget->inflight.fetch_sub(k.length);return {};}
-  try{sh.map.emplace(k,p);}catch(...){budget->inflight.fetch_sub(k.length);throw;}
+  try{if(share)sh.map.emplace(k,p);}catch(...){budget->inflight.fetch_sub(k.length);throw;}
   if(st)++st->owners;return {p,true};
  }
  void publish(const std::shared_ptr<SharedRequest>& p,std::exception_ptr error={}){
   auto& sh=shard(p->key);
   {auto* st=stats(p->key);TimedLock lock(sh.mu,st);if(st)++st->publishes;std::lock_guard<std::mutex> state(p->mu);
-   auto it=sh.map.find(p->key);if(it==sh.map.end()||it->second!=p)std::terminate();
+   auto it=sh.map.find(p->key);
+   if(!p->independent&&(it==sh.map.end()||it->second!=p))std::terminate();
+   if(p->independent&&!error&&config().retention!="none"){
+    if(ttl())purge(sh,now_ns());
+    // Independent misses never register until completion. First successful admission wins.
+    try{auto inserted=sh.map.emplace(p->key,p);it=inserted.first;}catch(...){it=sh.map.end();}
+   }
+   const bool registered=it!=sh.map.end()&&it->second==p;
    p->error=error;p->ready=true;
    if(!error&&config().retention!="none"){
     auto* diag=config().ready_stats?current():nullptr;const auto begin=diag?now_ns():0;
-    p->published=now_ns();p->retained=admit(sh,p);
+    p->published=now_ns();p->retained=registered&&admit(sh,p);
     if(diag)diag->ready_retention_ns+=now_ns()-begin;
     if(p->retained){Budget::high(budget->ready_peak,budget->ready.load());if(auto* q=current())++q->ready_admissions;}
     else if(auto* q=current())++q->ready_rejects;
    }
    budget->inflight.fetch_sub(p->key.length);
-   if(!p->retained)sh.map.erase(it);
+   if(registered&&!p->retained)sh.map.erase(it);
    if(!error&&config().reuse_stats){
     // Diagnostic allocation must never prevent notification.
     if(!sh.history)sh.history.reset(new(std::nothrow) History[1024]);

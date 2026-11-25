@@ -231,14 +231,14 @@ void LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, io_contex
     assert(this->file_desc != -1);
     auto* q=qshape::current();
     if(q){q->reader_requests+=read_reqs.size();for(const auto& r:read_reqs)q->reader_bytes+=r.len;}
-    if(!q||qshape::config().sharing=="off"){execute_io(ctx,this->file_desc,read_reqs);return;}
+    if(!q||(qshape::config().sharing=="off"&&qshape::config().retention=="none")){execute_io(ctx,this->file_desc,read_reqs);return;}
     std::vector<qshape::Coordinator::Ticket> tickets;
     std::vector<AlignedRead> owners;
     tickets.reserve(read_reqs.size());owners.reserve(read_reqs.size());
     try {
         const auto begin=qshape::now_ns();
         for(const auto& r:read_reqs){
-            auto t=coordinator.acquire({r.offset,r.len},q->id,qshape::config().inflight_budget);
+            auto t=coordinator.acquire({r.offset,r.len},q->id,qshape::config().inflight_budget,qshape::config().sharing=="inflight");
             tickets.push_back(t);
             if(!t.req){++q->bypass;owners.push_back(r);}
             else if(t.owner)owners.emplace_back(r.offset,r.len,t.req->data);
