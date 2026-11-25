@@ -427,6 +427,8 @@ int main(int argc, char **argv)
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
 
+        optional_configs.add_options()("qshape-hash",po::value<std::string>(&qshape::config().hash_policy)->default_value("mixed"),"legacy/mixed; fixed for process lifetime");
+        optional_configs.add_options()("qshape-shard-stats",po::value<bool>(&qshape::config().shard_stats)->default_value(false),"Enable per-query shard lock profiling");
         optional_configs.add_options()("qshape-sharing",po::value<std::string>(&qshape::config().sharing)->default_value("off"),"off/inflight");
         optional_configs.add_options()("qshape-inflight-budget",po::value<uint64_t>(&qshape::config().inflight_budget)->default_value(67108864),"Shared payload byte budget");
         optional_configs.add_options()("qshape-enable", po::value<bool>(&qshape::config().enabled)->default_value(false), "Enable P0 counters");
@@ -450,6 +452,8 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
+        if(qshape::config().hash_policy!="legacy"&&qshape::config().hash_policy!="mixed")throw std::runtime_error("invalid hash policy");
+        if(qshape::config().shard_stats&&!qshape::config().enabled)throw std::runtime_error("shard stats requires qshape-enable");
         if(qshape::config().sharing!="off"&&qshape::config().sharing!="inflight")throw std::runtime_error("invalid sharing");
         if(qshape::config().sharing!="off"&&!qshape::config().enabled)throw std::runtime_error("sharing requires qshape-enable");
         if(qshape::scheduler_config().policy!="reorder"&&qshape::scheduler_config().policy!="group-aware")throw std::runtime_error("invalid scheduler");

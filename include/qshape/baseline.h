@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <array>
 #include <cstdint>
 #include <fstream>
 #include <stdexcept>
@@ -7,10 +8,12 @@
 #include <vector>
 namespace qshape {
 inline uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-struct Config { bool enabled=false, trace=false; std::string sharing="off"; uint64_t inflight_budget=67108864; std::string prefix="qshape"; };
+struct Config { bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false; uint64_t inflight_budget=67108864; std::string prefix="qshape"; };
 inline Config& config() { static Config c; return c; }
 struct Event { uint64_t id, offset, length, time; int64_t result; const char* kind; };
+struct ShardStats {uint64_t lookups=0,owners=0,joins=0,publishes=0,wait_ns=0,hold_ns=0;};
 struct Query {
+ std::array<ShardStats,64> shards{};
  uint64_t execution_id=0,group_id=0,dispatch_ns=0,scheduler_ns=0;
  uint64_t id=0,start=0,end=0,submitted=0,bytes=0,completed=0,errors=0,logical=0,hits=0,next=0;
  uint64_t reader_requests=0,reader_bytes=0,shared_hits=0,shared_bytes=0,same_query_hits=0,bypass=0,lookup_ns=0,wait_copy_ns=0,peak_shared_bytes=0;
@@ -35,6 +38,16 @@ inline void write(const std::vector<Query>& qs,const std::string& prefix,uint64_
   reads+=q.submitted;bytes+=q.bytes;errors+=q.errors;logical+=q.logical;hits+=q.hits;
  }
  summary<<"queries,elapsed_ns,logical_node_reads,static_cache_hits,submitted_reads,submitted_bytes,completion_errors\n"<<qs.size()<<','<<finish-arrival<<','<<logical<<','<<hits<<','<<reads<<','<<bytes<<','<<errors<<'\n';
+ if(config().shard_stats){
+  std::ofstream shard(prefix+"_shards.csv");
+  shard<<"shard_id,lookups,owners,joins,publishes,lock_wait_ns,lock_hold_ns\n";
+  for(size_t i=0;i<64;++i){
+   ShardStats t;
+   for(const auto& q:qs){const auto& s=q.shards[i];t.lookups+=s.lookups;t.owners+=s.owners;t.joins+=s.joins;t.publishes+=s.publishes;t.wait_ns+=s.wait_ns;t.hold_ns+=s.hold_ns;}
+   shard<<i<<','<<t.lookups<<','<<t.owners<<','<<t.joins<<','<<t.publishes<<','<<t.wait_ns<<','<<t.hold_ns<<'\n';
+  }
+  if(!shard)throw std::runtime_error("shard output failed");
+ }
  if(config().trace) {
   std::ofstream io(prefix+"_io.csv");
   io<<"query_id,thread_id,request_id,offset,length,event_type,timestamp_ns,result\n";
