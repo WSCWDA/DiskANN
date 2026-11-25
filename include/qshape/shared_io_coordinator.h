@@ -81,7 +81,7 @@ class Coordinator {
   }
  }
  bool admit(Shard& sh,const std::shared_ptr<SharedRequest>& p){
-  if(!dynamic())return Budget::reserve(budget->ready,p->key.length,config().ready_budget);
+  if(!dynamic()&&config().retention!="bounded-local")return Budget::reserve(budget->ready,p->key.length,config().ready_budget);
   const auto now=now_ns();p->published=now;purge(sh,now);
   const auto cap=config().ready_budget/64+(shard_id(p->key)<config().ready_budget%64?1:0);
   if(p->key.length>cap)return false;
