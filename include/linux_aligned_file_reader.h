@@ -5,10 +5,12 @@
 #ifndef _WINDOWS
 
 #include "aligned_file_reader.h"
+#include "qshape/shared_io_coordinator.h"
 
 class LinuxAlignedFileReader : public AlignedFileReader
 {
   private:
+    qshape::Coordinator coordinator;
     uint64_t file_sz;
     FileHandle file_desc;
     io_context_t bad_ctx = (io_context_t)-1;

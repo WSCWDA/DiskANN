@@ -427,12 +427,14 @@ int main(int argc, char **argv)
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
 
+        optional_configs.add_options()("qshape-sharing",po::value<std::string>(&qshape::config().sharing)->default_value("off"),"off/inflight");
+        optional_configs.add_options()("qshape-inflight-budget",po::value<uint64_t>(&qshape::config().inflight_budget)->default_value(67108864),"Shared payload byte budget");
         optional_configs.add_options()("qshape-enable", po::value<bool>(&qshape::config().enabled)->default_value(false), "Enable P0 counters");
         optional_configs.add_options()("qshape-trace", po::value<bool>(&qshape::config().trace)->default_value(false), "Enable IO trace");
         optional_configs.add_options()("qshape-output-prefix", po::value<std::string>(&qshape::config().prefix)->default_value("qshape"), "Output prefix");
         optional_configs.add_options()("qshape-grouping",po::value<std::string>(&qshape::grouping_config().policy)->default_value("original"),"original/random/similarity/oracle");
-        optional_configs.add_options()("qshape-group-size",po::value<uint32_t>(&qshape::grouping_config().group_size)->default_value(64),"Logical group size");
-        optional_configs.add_options()("qshape-candidate-pool",po::value<uint32_t>(&qshape::grouping_config().candidate_pool)->default_value(256),"Bounded candidate pool");
+        optional_configs.add_options()("qshape-group-size",po::value<uint32_t>(&qshape::grouping_config().group_size)->default_value(256),"Logical group size");
+        optional_configs.add_options()("qshape-candidate-pool",po::value<uint32_t>(&qshape::grouping_config().candidate_pool)->default_value(512),"Bounded candidate pool");
         optional_configs.add_options()("qshape-seed",po::value<uint32_t>(&qshape::grouping_config().seed)->default_value(42),"Random seed");
         optional_configs.add_options()("qshape-oracle-file",po::value<std::string>(&qshape::grouping_config().oracle_file)->default_value(""),"Offline evaluation permutation");
         optional_configs.add_options()("qshape-scheduler",po::value<std::string>(&qshape::scheduler_config().policy)->default_value("reorder"),"reorder/group-aware");
@@ -448,6 +450,8 @@ int main(int argc, char **argv)
             return 0;
         }
         po::notify(vm);
+        if(qshape::config().sharing!="off"&&qshape::config().sharing!="inflight")throw std::runtime_error("invalid sharing");
+        if(qshape::config().sharing!="off"&&!qshape::config().enabled)throw std::runtime_error("sharing requires qshape-enable");
         if(qshape::scheduler_config().policy!="reorder"&&qshape::scheduler_config().policy!="group-aware")throw std::runtime_error("invalid scheduler");
         if(!qshape::scheduler_config().lookahead)throw std::runtime_error("invalid scheduler lookahead");
         if(qshape::scheduler_config().policy!="reorder"&&!qshape::config().enabled)throw std::runtime_error("scheduler requires qshape-enable");

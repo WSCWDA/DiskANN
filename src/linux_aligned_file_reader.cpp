@@ -51,57 +51,40 @@ void execute_io(io_context_t ctx, int fd, std::vector<AlignedRead> &read_reqs, u
             cbs[i] = cb.data() + i;
         }
 
-        uint64_t n_tries = 0;
-        while (n_tries <= n_retries)
-        {
-            // issue reads
-            auto* q=qshape::current();
-            const uint64_t first=q?q->next:0;
-            int64_t ret = io_submit(ctx, (int64_t)n_ops, cbs.data());
-            if(q && ret>0) {
-                const auto t=qshape::config().trace?qshape::now_ns():0;
-                for(int64_t j=0;j<ret;++j) {
-                    const auto& req=read_reqs[iter*MAX_EVENTS+j];
-                    ++q->submitted; q->bytes+=req.len;
-                    q->event(q->next++,req.offset,req.len,"IO_SUBMIT",0,t);
-                }
-            }
-            // if requests didn't get accepted
-            if (ret != (int64_t)n_ops)
-            {
-                std::cerr << "io_submit() failed; returned " << ret << ", expected=" << n_ops << ", ernno=" << errno
-                          << "=" << ::strerror(-ret) << ", try #" << n_tries + 1;
-                std::cout << "ctx: " << ctx << "\n";
-                exit(-1);
-            }
-            else
-            {
-                // wait on io_getevents
-                ret = io_getevents(ctx, (int64_t)n_ops, (int64_t)n_ops, evts.data(), nullptr);
-                // if requests didn't complete
-                if (ret != (int64_t)n_ops)
-                {
-                    std::cerr << "io_getevents() failed; returned " << ret << ", expected=" << n_ops
-                              << ", ernno=" << errno << "=" << ::strerror(-ret) << ", try #" << n_tries + 1;
-                    exit(-1);
-                }
-                else
-                {
-                    if(q) {
-                        const auto t=qshape::config().trace?qshape::now_ns():0;
-                        for(uint64_t j=0;j<n_ops;++j) {
-                            const auto idx=static_cast<uint64_t>(evts[j].obj-cb.data());
-                            const auto& req=read_reqs[iter*MAX_EVENTS+idx];
-                            const auto result=static_cast<int64_t>(evts[j].res);
-                            ++q->completed;
-                            if(result!=static_cast<int64_t>(req.len)||evts[j].res2!=0) ++q->errors;
-                            q->event(first+idx,req.offset,req.len,"IO_COMPLETE",result,t);
-                        }
-                    }
-                    break;
-                }
+        auto* q=qshape::current();
+        const uint64_t first=q?q->next:0;
+        // Reserve before submission: trace allocation must not unwind live DMA buffers.
+        if(q&&qshape::config().trace)q->events.reserve(q->events.size()+2*n_ops);
+        int64_t ret=io_submit(ctx,n_ops,cbs.data());
+        if(ret<0)throw std::runtime_error("io_submit failed: "+std::to_string(ret));
+        const uint64_t accepted=ret;
+        if(q){
+            const auto t=qshape::config().trace?qshape::now_ns():0;
+            for(uint64_t j=0;j<accepted;++j){
+                const auto& req=read_reqs[iter*MAX_EVENTS+j];
+                ++q->submitted;q->bytes+=req.len;
+                q->event(q->next++,req.offset,req.len,"IO_SUBMIT",0,t);
             }
         }
+        uint64_t harvested=0;bool failed=accepted!=n_ops;
+        while(harvested<accepted){
+            ret=io_getevents(ctx,accepted-harvested,accepted-harvested,evts.data(),nullptr);
+            if(ret==-EINTR)continue;
+            // Cannot safely unwind if kernel ownership of buffers is unknown.
+            if(ret<=0){std::cerr<<"fatal io_getevents failure "<<ret<<std::endl;std::abort();}
+            const auto t=q&&qshape::config().trace?qshape::now_ns():0;
+            for(int64_t j=0;j<ret;++j){
+                const auto idx=static_cast<uint64_t>(evts[j].obj-cb.data());
+                if(idx>=accepted)std::abort();
+                const auto& req=read_reqs[iter*MAX_EVENTS+idx];
+                const auto result=static_cast<int64_t>(evts[j].res);
+                const bool bad=result!=static_cast<int64_t>(req.len)||evts[j].res2!=0;
+                failed|=bad;
+                if(q){++q->completed;if(bad)++q->errors;q->event(first+idx,req.offset,req.len,"IO_COMPLETE",result,t);}
+            }
+            harvested+=ret;
+        }
+        if(failed)throw std::runtime_error("partial submission or failed/short read");
         // disabled since req.buf could be an offset into another buf
         /*
         for (auto &req : read_reqs) {
@@ -244,5 +227,31 @@ void LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs, io_contex
         diskann::cout << "Async currently not supported in linux." << std::endl;
     }
     assert(this->file_desc != -1);
-    execute_io(ctx, this->file_desc, read_reqs);
+    auto* q=qshape::current();
+    if(q){q->reader_requests+=read_reqs.size();for(const auto& r:read_reqs)q->reader_bytes+=r.len;}
+    if(!q||qshape::config().sharing=="off"){execute_io(ctx,this->file_desc,read_reqs);return;}
+    std::vector<qshape::Coordinator::Ticket> tickets;
+    std::vector<AlignedRead> owners;
+    tickets.reserve(read_reqs.size());owners.reserve(read_reqs.size());
+    try {
+        const auto begin=qshape::now_ns();
+        for(const auto& r:read_reqs){
+            auto t=coordinator.acquire({r.offset,r.len},q->id,qshape::config().inflight_budget);
+            tickets.push_back(t);
+            if(!t.req){++q->bypass;owners.push_back(r);}
+            else if(t.owner)owners.emplace_back(r.offset,r.len,t.req->data);
+            else {++q->shared_hits;q->shared_bytes+=r.len;if(t.req->owner==q->id)++q->same_query_hits;}
+        }
+        q->lookup_ns+=qshape::now_ns()-begin;
+        q->peak_shared_bytes=std::max(q->peak_shared_bytes,coordinator.peak());
+        execute_io(ctx,this->file_desc,owners);
+    } catch(...) {
+        auto error=std::current_exception();
+        for(auto& t:tickets)if(t.owner)coordinator.publish(t.req,error);
+        throw;
+    }
+    for(auto& t:tickets)if(t.owner)coordinator.publish(t.req);
+    const auto begin=qshape::now_ns();
+    for(size_t i=0;i<tickets.size();++i)if(tickets[i].req)coordinator.consume(tickets[i].req,read_reqs[i].buf);
+    q->wait_copy_ns+=qshape::now_ns()-begin;
 }
