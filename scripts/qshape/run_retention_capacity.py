@@ -7,16 +7,17 @@ def atomic(p,s):
     tmp=p.with_suffix(p.suffix+'.tmp');tmp.write_text(s);os.replace(tmp,p)
 def main():
     p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--bench',type=Path,required=True)
-    p.add_argument('--profile',choices=['smoke','pilot','formal'],default='smoke');p.add_argument('--repeats',type=int,default=3)
+    p.add_argument('--profile',choices=['smoke','pilot','formal','skew-smoke','skew'],default='smoke');p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--timeout',type=int,default=900);p.add_argument('--retries',type=int,default=1);a=p.parse_args()
     check(a.timeout>0 and a.retries>=0,'timeout/retries')
-    check(a.profile!='formal' or a.repeats>=3,'formal repeats')
+    check(a.profile not in ('formal','skew') or a.repeats>=3,'formal repeats')
     bench=a.bench.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
     with (out/'.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         repo=Path(__file__).resolve().parents[2]
         git=lambda *args:subprocess.check_output(['git','-C',str(repo),*args],text=True).strip()
         config=dict(profile=a.profile,repeats=a.repeats,commit=git('rev-parse','HEAD'),tracked_dirty=git('status','--porcelain','--untracked-files=no'),bench_sha256=digest(bench))
+        check(a.profile!='skew' or a.repeats==3,'skew requires seeds 42-44')
         cases=matrix(a.profile,a.repeats)
         cp=out/'config.json';mp=out/'manifest.csv'
         if cp.exists():check(json.loads(cp.read_text())==config,'resume configuration/binary mismatch')

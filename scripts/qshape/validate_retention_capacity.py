@@ -12,14 +12,14 @@ def digest(p):
         for b in iter(lambda:f.read(1048576),b''): h.update(b)
     return h.hexdigest()
 def matrix(profile,repeats):
-    check(profile in ('smoke','pilot','formal') and repeats>0,'profile/repeats')
-    ns,ops={'smoke':([10000],20000),'pilot':([100000,1000000,10000000],1000000),'formal':([100000,1000000,10000000],10000000)}[profile]
+    check(profile in ('smoke','pilot','formal','skew-smoke','skew') and repeats>0,'profile/repeats')
+    ns,ops={'smoke':([10000],20000),'pilot':([100000,1000000,10000000],1000000),'formal':([100000,1000000,10000000],10000000),'skew-smoke':([10000],20000),'skew':([1000000],10000000)}[profile]
     cases=[]
     for seed in range(42,42+repeats):
         batch=[]
         for n in ns:
-            for skew in (0,1):
-                for p,m in [(p,0) for p in ('none','bounded-local','lru','exact')]+[('cms',k*1024) for k in (64,256,512,1024,2048)]:
+            for skew in ((0.8,1.2) if profile.startswith('skew') else (0,1)):
+                for p,m in [(p,0) for p in (('lru','exact') if profile.startswith('skew') else ('none','bounded-local','lru','exact'))]+[('cms',k*1024) for k in (64,256,512,1024,2048)]:
                     batch.append(dict(zip(FIELDS,map(str,(p,n,ops,skew,seed,16777216,m,'perf')))))
         random.Random(seed).shuffle(batch)
         cases.extend(batch)

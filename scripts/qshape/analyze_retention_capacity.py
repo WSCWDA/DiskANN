@@ -3,7 +3,7 @@ from pathlib import Path
 from validate_retention_capacity import validate
 
 def ratio(a,b):return a/b if b>0 else None
-def derive(rows):
+def derive(rows, min_reference_gain=0):
     refs={(x['n'],x['ops'],x['skew'],x['seed'],x['policy'],x['meta_budget']):x for x in rows}
     result=[]
     for x in rows:
@@ -12,7 +12,8 @@ def derive(rows):
         n=int(x['ops']);h=x['hits'];m=x['counter_bytes'];speed=n*1e9/x['elapsed_ns']
         result.append(dict(x,hit_ratio=h/n,ops_per_second=speed,
             utility_preservation=ratio(h,exact['hits']),
-            incremental_preservation=ratio(h-lru['hits'],exact['hits']-lru['hits']),
+            reference_gain=(exact['hits']-lru['hits'])/n,
+            incremental_preservation=ratio(h-lru['hits'],exact['hits']-lru['hits']) if (exact['hits']-lru['hits'])/n>=min_reference_gain else None,
             absolute_utility_loss=(exact['hits']-h)/n,
             admission_reduction=None if not lru['admissions'] else 1-x['admissions']/lru['admissions'],
             admission_productivity=ratio(h,x['admissions']),
@@ -22,14 +23,12 @@ def derive(rows):
 def write(p,rows):
     with p.open('w',newline='') as f:
         w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
-def main():
-    p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);a=p.parse_args()
-    rows=derive(validate(a.out));write(a.out/'capacity_metrics.csv',rows)
+def summarize(rows):
     groups={}
     keys=('n','ops','skew','policy','meta_budget')
     for x in rows:groups.setdefault(tuple(x[k] for k in keys),[]).append(x)
     summary=[]
-    metrics=('observed','hits','reads','admissions','evictions','saturations','hit_ratio','ops_per_second','utility_preservation','incremental_preservation','absolute_utility_loss','admission_reduction','admission_productivity','processing_efficiency','metadata_pressure','update_pressure')
+    metrics=('observed','hits','reads','admissions','evictions','saturations','hit_ratio','ops_per_second','utility_preservation','reference_gain','incremental_preservation','absolute_utility_loss','admission_reduction','admission_productivity','processing_efficiency','metadata_pressure','update_pressure')
     for k,g in groups.items():
         s=dict(zip(keys,k),repeats=len(g))
         for m in metrics:
@@ -39,5 +38,10 @@ def main():
             s.update({m+'_mean':mean,m+'_sd':sd,m+'_valid':len(v)})
             if m=='ops_per_second':s['throughput_cv']=sd/mean if sd is not None and mean else None
         summary.append(s)
-    write(a.out/'capacity_summary.csv',summary)
+    return summary
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);a=p.parse_args()
+    rows=derive(validate(a.out));write(a.out/'capacity_metrics.csv',rows)
+    write(a.out/'capacity_summary.csv',summarize(rows))
 if __name__=='__main__':main()

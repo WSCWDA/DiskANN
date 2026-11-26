@@ -7,6 +7,16 @@ class TestCapacity(unittest.TestCase):
         self.assertEqual(len(matrix('formal',3)),162)
         self.assertEqual(len(matrix('smoke',1)),18)
         self.assertEqual(len({tuple(c[k] for k in FIELDS) for c in matrix('formal',3)}),162)
+    def test_skew_matrix(self):
+        from analyze_retention_skew import select,compatible,BASE
+        self.assertEqual(len(matrix('skew-smoke',1)),14)
+        self.assertEqual(len(matrix('skew',3)),42)
+        old=[dict(c,saturations=0) for c in matrix('formal',3)]
+        new=[dict(c,saturations=0) for c in matrix('skew',3)]
+        self.assertEqual(len(select(old,new)),84)
+        with self.assertRaises(ValueError):select(old,new[:-1])
+        with self.assertRaises(ValueError):select(old,new[:-1]+[new[0]])
+        with self.assertRaises(ValueError):compatible(dict(profile='formal',repeats=3,tracked_dirty='',bench_sha256='a',commit=BASE),dict(profile='skew',repeats=3,tracked_dirty='',bench_sha256='b'),Path('.'))
     def test_row_and_receipt(self):
         c=next(c for c in matrix('smoke',1) if c['policy']=='cms')
         v=dict.fromkeys(COUNTS,0)
@@ -28,5 +38,6 @@ class TestCapacity(unittest.TestCase):
         for p,h in [('lru',10),('exact',20),('cms',19)]:
             rows.append(dict(n='100',ops='100',skew='1',seed='42',policy=p,meta_budget='64' if p=='cms' else '0',hits=h,observed=50,counter_bytes=64 if p=='cms' else 0,elapsed_ns=100,admissions=10))
         x=derive(rows)[2];self.assertAlmostEqual(x['incremental_preservation'],.9)
+        self.assertIsNone(derive(rows,min_reference_gain=.2)[2]['incremental_preservation'])
         rows[1]['hits']=10;self.assertIsNone(derive(rows)[2]['incremental_preservation'])
 if __name__=='__main__':unittest.main()
