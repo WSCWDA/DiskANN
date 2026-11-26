@@ -463,7 +463,7 @@ int main(int argc, char **argv)
         }
         po::notify(vm);
         const auto& rc=qshape::config();
-        if(rc.region_trace&&(!rc.enabled||rc.sharing!="inflight"||!rc.region_event_limit||Lvec.size()!=1||rc.retention=="none"))throw std::runtime_error("region trace requires enabled, inflight, retention, single L and positive event limit");
+        if(rc.region_trace&&(!rc.enabled||rc.sharing!="inflight"||!rc.region_event_limit||Lvec.size()!=1))throw std::runtime_error("region trace requires enabled, inflight, single L and positive event limit");
         if(rc.retention!="none"&&rc.retention!="bounded"&&rc.retention!="bounded-local"&&rc.retention!="ttl"&&rc.retention!="lru"&&rc.retention!="ttl-lru"&&rc.retention!="frequency")throw std::runtime_error("invalid retention");
         if(!rc.ready_ttl_us)throw std::runtime_error("TTL must be positive");
         if(rc.frequency_shadow&&(!rc.enabled||rc.retention!="frequency"||rc.frequency_mode!="cms"))throw std::runtime_error("shadow requires enabled CMS frequency retention");
