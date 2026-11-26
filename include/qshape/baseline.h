@@ -1,3 +1,4 @@
+#include "shadow_frequency.h"
 #pragma once
 #include <chrono>
 #include <array>
@@ -8,13 +9,14 @@
 #include <vector>
 namespace qshape {
 inline uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-struct Config { bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false, breakdown=false, reuse_stats=false; uint64_t inflight_budget=67108864; std::string retention="none", frequency_mode="exact"; uint64_t frequency_budget=1048576,frequency_depth=4; uint64_t ready_budget=16777216, ready_ttl_us=5000; bool ready_stats=false, region_trace=false; uint64_t region_event_limit=4096; std::string prefix="qshape"; };
+struct Config { bool frequency_shadow=false; bool enabled=false, trace=false; std::string sharing="off", hash_policy="mixed"; bool shard_stats=false, breakdown=false, reuse_stats=false; uint64_t inflight_budget=67108864; std::string retention="none", frequency_mode="exact"; uint64_t frequency_budget=1048576,frequency_depth=4; uint64_t ready_budget=16777216, ready_ttl_us=5000; bool ready_stats=false, region_trace=false; uint64_t region_event_limit=4096; std::string prefix="qshape"; };
 inline Config& config() { static Config c; return c; }
 struct Event { uint64_t id, offset, length, time; int64_t result; const char* kind; };
 struct ShardStats {uint64_t lookups=0,owners=0,joins=0,publishes=0,wait_ns=0,hold_ns=0;};
 struct ReuseSample {uint64_t gap,offset,length,previous_query,previous_group;};
 struct RegionEvent {uint64_t offset,length,time,owner,life; const char* kind;};
 struct Query {
+ ShadowStats shadow;
  uint64_t region_next=0,region_dropped=0;
  std::vector<RegionEvent> regions;
  void region(uint64_t off,uint64_t len,const char* kind,uint64_t owner,uint64_t life) noexcept {
@@ -45,6 +47,15 @@ struct Scope {
  ~Scope() { if(current()) current()->end=now_ns(); current()=previous; }
 };
 inline void write(const std::vector<Query>& qs,const std::string& prefix,uint64_t arrival,uint64_t finish) {
+ if(config().frequency_shadow){
+  std::ofstream f(prefix+"_shadow.csv"), h(prefix+"_shadow_histogram.csv");
+  f<<"query_id,updates,failures,invalid,entries,checks,aa,rr,fa,fr,victims,under\n";
+  h<<"query_id,kind,bucket,count\n";
+  for(const auto& q:qs){const auto& z=q.shadow;
+   f<<q.id<<','<<z.updates<<','<<z.failures<<','<<z.invalid<<','<<z.entries<<','<<z.checks<<','<<z.aa<<','<<z.rr<<','<<z.fa<<','<<z.fr<<','<<z.victims<<','<<z.under<<'\n';
+   for(unsigned i=0;i<7;++i){h<<q.id<<",candidate_error,"<<i<<','<<z.candidate_error[i]<<'\n';h<<q.id<<",victim_error,"<<i<<','<<z.victim_error[i]<<'\n';for(unsigned j=0;j<4;++j)h<<q.id<<",margin_"<<j<<','<<i<<','<<z.margin[j][i]<<'\n';}
+  }
+ }
  std::ofstream out(prefix+"_queries.csv"), summary(prefix+"_summary.csv");
  out<<"query_id,execution_id,group_id,thread_id,arrival_ns,search_start_ns,search_end_ns,logical_node_reads,static_cache_hits,submitted_reads,submitted_bytes,completed_reads,completion_errors,dispatch_ns,scheduler_ns,reader_requests,reader_bytes,shared_hits,shared_bytes,same_query_hits,bypass,lookup_ns,wait_copy_ns,peak_shared_bytes,ready_hits,ready_hit_bytes,ready_admissions,ready_rejects,peak_ready_bytes,peak_inflight_bytes,ready_ttl_evictions,ready_capacity_evictions,ready_unused_evictions,ready_cross_query_hits,ready_same_group_hits,ready_cross_group_hits,ready_hit_age_ns,ready_eviction_age_ns,ready_retention_ns,frequency_updates,frequency_update_failures,frequency_shard_entries,frequency_gate_checks,frequency_gate_accepts,frequency_gate_rejects,frequency_tracking_ns,frequency_saturations,frequency_counter_bytes\n";
  uint64_t reads=0,bytes=0,errors=0,logical=0,hits=0;

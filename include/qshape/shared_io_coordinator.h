@@ -43,7 +43,7 @@ struct SharedRequest {
 class Coordinator {
  // Direct-mapped, bounded history: 1024 entries per shard, no retained payload.
  struct History {Key key{};uint64_t time=0,query=0,group=0;};
- struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::unordered_map<Key,uint64_t,Hash> frequencies; FrequencySketch sketch; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
+ struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::unordered_map<Key,uint64_t,Hash> frequencies; FrequencySketch sketch; std::unordered_map<Key,uint64_t,Hash> shadow; bool shadow_valid=true; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
  static size_t history_slot(Key k){return (Hash{}(k)>>6)%1024;}
  std::array<Shard,64> shards;
  std::shared_ptr<Budget> budget=std::make_shared<Budget>();
@@ -72,6 +72,7 @@ class Coordinator {
  static bool lru(){return config().retention=="lru"||config().retention=="ttl-lru"||frequency();}
  static bool cms(){return config().frequency_mode=="cms";}
  static uint64_t count(const Shard& sh,Key k){if(cms())return sh.sketch.estimate(k.offset,k.length);auto i=sh.frequencies.find(k);return i==sh.frequencies.end()?0:i->second;}
+ static uint64_t exact_shadow(const Shard& sh,Key k){auto i=sh.shadow.find(k);return i==sh.shadow.end()?0:i->second;}
  static bool dynamic(){return ttl()||lru();}
  static bool expired(const SharedRequest& p,uint64_t now){return ttl()&&(now-p.published)/1000>=config().ready_ttl_us;}
  // All list/map operations under the owning shard lock. No cross-shard locking.
@@ -98,10 +99,21 @@ class Coordinator {
    uint64_t remaining=sh.ready_bytes;
    const bool gate=remaining>cap-p->key.length;
    auto* q=current(); if(gate&&q)++q->frequency_gate_checks;
+   bool accept=true;
+   const bool observe=gate&&config().frequency_shadow&&q&&sh.shadow_valid;
+   const auto candidate=count(sh,p->key);
+   const auto exact=observe?exact_shadow(sh,p->key):0;
+   uint64_t max_exact=0;
+   if(observe)q->shadow.error(candidate,exact,true);
    for(auto it=sh.lru.begin();remaining>cap-p->key.length&&it!=sh.lru.end();++it){
-    if(count(sh,p->key)<=count(sh,*it)){if(q)++q->frequency_gate_rejects;return false;}
+    const auto estimate=count(sh,*it);
+    if(candidate<=estimate){accept=false;if(!observe){if(q)++q->frequency_gate_rejects;return false;}}
+    if(observe){const auto v=exact_shadow(sh,*it);max_exact=std::max(max_exact,v);++q->shadow.victims;q->shadow.error(estimate,v,false);}
     remaining-=it->length;
    }
+   if(observe&&remaining<=cap-p->key.length)q->shadow.decision(accept,exact>max_exact,exact,max_exact);
+   if(gate&&config().frequency_shadow&&q&&(!observe||remaining>cap-p->key.length))++q->shadow.invalid;
+   if(!accept){if(q)++q->frequency_gate_rejects;return false;}
    if(remaining>cap-p->key.length){if(gate&&q)++q->frequency_gate_rejects;return false;}
    if(gate&&q)++q->frequency_gate_accepts;
    try{sh.lru.push_back(p->key);try{sh.expiry.push_back(p->key);}catch(...){sh.lru.pop_back();return false;}}catch(...){return false;}
@@ -131,7 +143,7 @@ public:
     if(!it->second->retained){++it;continue;}
     budget->ready.fetch_sub(it->first.length);it=sh.map.erase(it);
    }
-   sh.history.reset();sh.frequencies.clear();sh.frequencies.rehash(0);sh.sketch.clear();sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
+   sh.history.reset();sh.frequencies.clear();sh.frequencies.rehash(0);sh.sketch.clear();sh.shadow.clear();sh.shadow.rehash(0);sh.shadow_valid=true;sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
   }
  }
  Ticket acquire(Key k,uint64_t qid,uint64_t limit,bool share=true){
@@ -143,6 +155,11 @@ public:
    if(cms()){auto n=sh.sketch.increment(k.offset,k.length);if(q){++q->frequency_updates;q->frequency_saturations+=n;q->frequency_counter_bytes=64*sh.sketch.bytes();}}
    else try{auto& n=sh.frequencies[k];if(n!=UINT64_MAX)++n;if(q){++q->frequency_updates;q->frequency_shard_entries=std::max(q->frequency_shard_entries,static_cast<uint64_t>(sh.frequencies.size()));}}
    catch(const std::bad_alloc&){if(q)++q->frequency_update_failures;}
+   if(config().frequency_shadow){
+    if(sh.shadow_valid)try{auto& n=sh.shadow[k];if(n==UINT64_MAX)sh.shadow_valid=false;else{++n;if(q){++q->shadow.updates;q->shadow.entries=std::max(q->shadow.entries,static_cast<uint64_t>(sh.shadow.size()));}}}
+    catch(const std::bad_alloc&){sh.shadow_valid=false;}
+    if(!sh.shadow_valid&&q)++q->shadow.failures;
+   }
    if(diag)diag->frequency_tracking_ns+=now_ns()-t;
   }
   if(ttl())purge(sh,now_ns());

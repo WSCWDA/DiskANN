@@ -445,6 +445,7 @@ int main(int argc, char **argv)
         optional_configs.add_options()("qshape-breakdown",po::value<bool>(&qshape::config().breakdown)->default_value(false),"Owner/consumer timing");
         optional_configs.add_options()("qshape-reuse-stats",po::value<bool>(&qshape::config().reuse_stats)->default_value(false),"Bounded post-publish reuse history");
         optional_configs.add_options()("qshape-retention",po::value<std::string>(&qshape::config().retention)->default_value("none"),"none/bounded/bounded-local/ttl/lru/ttl-lru/frequency");
+        optional_configs.add_options()("qshape-frequency-shadow",po::value<bool>(&qshape::config().frequency_shadow)->default_value(false),"diagnostic exact frequency reference");
         optional_configs.add_options()("qshape-frequency-mode",po::value<std::string>(&qshape::config().frequency_mode)->default_value("exact"),"exact/cms");
         optional_configs.add_options()("qshape-frequency-budget",po::value<uint64_t>(&qshape::config().frequency_budget)->default_value(1048576),"total sketch counter bytes");
         optional_configs.add_options()("qshape-frequency-depth",po::value<uint64_t>(&qshape::config().frequency_depth)->default_value(4),"sketch depth 1-8");
@@ -465,6 +466,7 @@ int main(int argc, char **argv)
         if(rc.region_trace&&(!rc.enabled||rc.sharing!="inflight"||!rc.region_event_limit||Lvec.size()!=1||rc.retention=="none"))throw std::runtime_error("region trace requires enabled, inflight, retention, single L and positive event limit");
         if(rc.retention!="none"&&rc.retention!="bounded"&&rc.retention!="bounded-local"&&rc.retention!="ttl"&&rc.retention!="lru"&&rc.retention!="ttl-lru"&&rc.retention!="frequency")throw std::runtime_error("invalid retention");
         if(!rc.ready_ttl_us)throw std::runtime_error("TTL must be positive");
+        if(rc.frequency_shadow&&(!rc.enabled||rc.retention!="frequency"||rc.frequency_mode!="cms"))throw std::runtime_error("shadow requires enabled CMS frequency retention");
         if(rc.frequency_mode!="exact"&&rc.frequency_mode!="cms")throw std::runtime_error("invalid frequency mode");
         if(rc.frequency_mode=="cms"&&(rc.retention!="frequency"||!rc.frequency_depth||rc.frequency_depth>8||rc.frequency_budget/64/4<rc.frequency_depth))throw std::runtime_error("invalid CMS configuration");
         if(rc.retention!="none"&&(!rc.enabled||!rc.ready_budget||rc.ready_budget>UINT64_MAX-rc.inflight_budget||rc.reuse_stats||Lvec.size()!=1))throw std::runtime_error("retention requires qshape-enable, positive budget, single L and reuse history off");
