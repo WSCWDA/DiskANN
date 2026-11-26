@@ -1,7 +1,18 @@
 import argparse, hashlib, json, os, random, statistics, subprocess
 from pathlib import Path
 from validate_frequency_capacity import ck, read, write, recall, quantile, validate_query
-POLICIES={**{f'A{i}':('similarity' if i&1 else 'original','inflight' if i&2 else 'off','cms_512k' if i&4 else 'none') for i in range(8)},'R1':('similarity','inflight','lru'),'R2':('similarity','inflight','exact')}
+POLICIES={
+    'A0': ('original','off','none'),
+    'A1': ('similarity','off','none'),
+    'A2': ('original','inflight','none'),
+    'A3': ('original','off','cms_512k'),
+    'A4': ('similarity','inflight','none'),
+    'A5': ('similarity','off','cms_512k'),
+    'A6': ('original','inflight','cms_512k'),
+    'A7': ('similarity','inflight','cms_512k'),
+    'R1': ('similarity','inflight','lru'),
+    'R2': ('similarity','inflight','exact'),
+}
 def plan(repeats):
     result=[]
     for r in range(1,repeats+1):
@@ -44,7 +55,7 @@ def inspect(p,i,n):
 def config(a):
     e={k:os.environ[k] for k in ('SEARCH_BIN','INDEX_PREFIX','QUERY_FILE','GT_FILE')}
     for k in e:e[k]=str(Path(e[k]).resolve())
-    return dict(repeats=a.repeats,queries=10000,inputs=e,binary_sha256=digest(e['SEARCH_BIN']),query_sha256=digest(e['QUERY_FILE']),gt_sha256=digest(e['GT_FILE']),commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),cases=[list(x) for x in plan(a.repeats)])
+    return dict(repeats=a.repeats,queries=10000,inputs=e,binary_sha256=digest(e['SEARCH_BIN']),query_sha256=digest(e['QUERY_FILE']),gt_sha256=digest(e['GT_FILE']),commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),policies={k:list(v) for k,v in POLICIES.items()},cases=[list(x) for x in plan(a.repeats)])
 def run(a):
     root=a.out.resolve();root.mkdir(parents=True,exist_ok=True);c=config(a);m=root/'manifest.json'
     ck(not subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],text=True).strip(),'tracked changes')
@@ -62,6 +73,7 @@ def run(a):
     validate(root)
 def validate(root):
     c=json.loads((root/'manifest.json').read_text());cases=plan(c['repeats']);ck(c['repeats'] in (1,3) and c['cases']==[list(x) for x in cases],'matrix')
+    ck(c.get('policies')=={k:list(v) for k,v in POLICIES.items()},'policy mapping mismatch; use a fresh output directory')
     rows=[];ref=None
     for r,i in cases:
         p=prefix(root,r,i);ck(json.loads((p.parent/'receipt.json').read_text())=={f.name:digest(f) for f in files(p)},'receipt')
