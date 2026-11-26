@@ -444,7 +444,7 @@ int main(int argc, char **argv)
         optional_configs.add_options()("qshape-region-trace",po::value<bool>(&qshape::config().region_trace)->default_value(false),"Region lifecycle trace")("qshape-region-event-limit",po::value<uint64_t>(&qshape::config().region_event_limit)->default_value(4096),"Maximum region events per query");
         optional_configs.add_options()("qshape-breakdown",po::value<bool>(&qshape::config().breakdown)->default_value(false),"Owner/consumer timing");
         optional_configs.add_options()("qshape-reuse-stats",po::value<bool>(&qshape::config().reuse_stats)->default_value(false),"Bounded post-publish reuse history");
-        optional_configs.add_options()("qshape-retention",po::value<std::string>(&qshape::config().retention)->default_value("none"),"none/bounded/bounded-local/ttl/lru/ttl-lru");
+        optional_configs.add_options()("qshape-retention",po::value<std::string>(&qshape::config().retention)->default_value("none"),"none/bounded/bounded-local/ttl/lru/ttl-lru/frequency");
         optional_configs.add_options()("qshape-ready-budget",po::value<uint64_t>(&qshape::config().ready_budget)->default_value(16777216),"READY payload byte budget");
         optional_configs.add_options()("qshape-ready-ttl-us",po::value<uint64_t>(&qshape::config().ready_ttl_us)->default_value(5000),"fixed publication TTL in microseconds")("qshape-ready-stats",po::value<bool>(&qshape::config().ready_stats)->default_value(false),"READY reuse diagnostics");
         // Merge required and optional parameters
@@ -460,7 +460,7 @@ int main(int argc, char **argv)
         po::notify(vm);
         const auto& rc=qshape::config();
         if(rc.region_trace&&(!rc.enabled||rc.sharing!="inflight"||!rc.region_event_limit||Lvec.size()!=1||rc.retention=="none"))throw std::runtime_error("region trace requires enabled, inflight, retention, single L and positive event limit");
-        if(rc.retention!="none"&&rc.retention!="bounded"&&rc.retention!="bounded-local"&&rc.retention!="ttl"&&rc.retention!="lru"&&rc.retention!="ttl-lru")throw std::runtime_error("invalid retention");
+        if(rc.retention!="none"&&rc.retention!="bounded"&&rc.retention!="bounded-local"&&rc.retention!="ttl"&&rc.retention!="lru"&&rc.retention!="ttl-lru"&&rc.retention!="frequency")throw std::runtime_error("invalid retention");
         if(!rc.ready_ttl_us)throw std::runtime_error("TTL must be positive");
         if(rc.retention!="none"&&(!rc.enabled||!rc.ready_budget||rc.ready_budget>UINT64_MAX-rc.inflight_budget||rc.reuse_stats||Lvec.size()!=1))throw std::runtime_error("retention requires qshape-enable, positive budget, single L and reuse history off");
         if((qshape::config().breakdown||qshape::config().reuse_stats)&&!qshape::config().enabled)throw std::runtime_error("diagnostics require qshape-enable");

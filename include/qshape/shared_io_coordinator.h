@@ -42,7 +42,7 @@ struct SharedRequest {
 class Coordinator {
  // Direct-mapped, bounded history: 1024 entries per shard, no retained payload.
  struct History {Key key{};uint64_t time=0,query=0,group=0;};
- struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
+ struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::unordered_map<Key,uint64_t,Hash> frequencies; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
  static size_t history_slot(Key k){return (Hash{}(k)>>6)%1024;}
  std::array<Shard,64> shards;
  std::shared_ptr<Budget> budget=std::make_shared<Budget>();
@@ -67,7 +67,9 @@ class Coordinator {
   if(config().region_trace)if(auto* q=current())q->region(p.key.offset,p.key.length,kind,p.owner,p.life);
  }
  static bool ttl(){return config().retention=="ttl"||config().retention=="ttl-lru";}
- static bool lru(){return config().retention=="lru"||config().retention=="ttl-lru";}
+ static bool frequency(){return config().retention=="frequency";}
+ static bool lru(){return config().retention=="lru"||config().retention=="ttl-lru"||frequency();}
+ static uint64_t count(const Shard& sh,Key k){auto i=sh.frequencies.find(k);return i==sh.frequencies.end()?0:i->second;}
  static bool dynamic(){return ttl()||lru();}
  static bool expired(const SharedRequest& p,uint64_t now){return ttl()&&(now-p.published)/1000>=config().ready_ttl_us;}
  // All list/map operations under the owning shard lock. No cross-shard locking.
@@ -89,6 +91,22 @@ class Coordinator {
   const auto now=now_ns();p->published=now;purge(sh,now);
   const auto cap=config().ready_budget/64+(shard_id(p->key)<config().ready_budget%64?1:0);
   if(p->key.length>cap)return false;
+  // Plan all victims before changing the cache. Allocate list nodes before eviction.
+  if(frequency()){
+   uint64_t remaining=sh.ready_bytes;
+   const bool gate=remaining>cap-p->key.length;
+   auto* q=current(); if(gate&&q)++q->frequency_gate_checks;
+   for(auto it=sh.lru.begin();remaining>cap-p->key.length&&it!=sh.lru.end();++it){
+    if(count(sh,p->key)<=count(sh,*it)){if(q)++q->frequency_gate_rejects;return false;}
+    remaining-=it->length;
+   }
+   if(remaining>cap-p->key.length){if(gate&&q)++q->frequency_gate_rejects;return false;}
+   if(gate&&q)++q->frequency_gate_accepts;
+   try{sh.lru.push_back(p->key);try{sh.expiry.push_back(p->key);}catch(...){sh.lru.pop_back();return false;}}catch(...){return false;}
+   while(sh.ready_bytes>cap-p->key.length)evict(sh,sh.lru.front(),false,now);
+   if(!Budget::reserve(budget->ready,p->key.length,config().ready_budget)){sh.lru.pop_back();sh.expiry.pop_back();return false;}
+   p->lru_pos=std::prev(sh.lru.end());p->expiry_pos=std::prev(sh.expiry.end());sh.ready_bytes+=p->key.length;return true;
+  }
   while(lru()&&sh.ready_bytes>cap-p->key.length&&!sh.lru.empty())evict(sh,sh.lru.front(),false,now);
   if(sh.ready_bytes>cap-p->key.length)return false;
   // Allocation failure rejects retention without preventing I/O publication.
@@ -110,13 +128,19 @@ public:
     if(!it->second->retained){++it;continue;}
     budget->ready.fetch_sub(it->first.length);it=sh.map.erase(it);
    }
-   sh.history.reset();sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
+   sh.history.reset();sh.frequencies.clear();sh.frequencies.rehash(0);sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
   }
  }
  Ticket acquire(Key k,uint64_t qid,uint64_t limit,bool share=true){
   auto& sh=shard(k);auto* st=stats(k);TimedLock lock(sh.mu,st);if(st)++st->lookups;
   auto* diag=config().ready_stats?current():nullptr;
   const auto begin=diag?now_ns():0;
+  if(frequency()){
+   auto* q=current();const auto t=diag?now_ns():0;
+   try{auto& n=sh.frequencies[k];if(n!=UINT64_MAX)++n;if(q){++q->frequency_updates;q->frequency_shard_entries=std::max(q->frequency_shard_entries,static_cast<uint64_t>(sh.frequencies.size()));}}
+   catch(const std::bad_alloc&){if(q)++q->frequency_update_failures;}
+   if(diag)diag->frequency_tracking_ns+=now_ns()-t;
+  }
   if(ttl())purge(sh,now_ns());
   auto it=sh.map.find(k);if(it!=sh.map.end()&&(share||it->second->retained)){
    auto& p=*it->second;
