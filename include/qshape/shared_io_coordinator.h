@@ -1,5 +1,6 @@
 #pragma once
 #include "baseline.h"
+#include "frequency_estimator.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -42,7 +43,7 @@ struct SharedRequest {
 class Coordinator {
  // Direct-mapped, bounded history: 1024 entries per shard, no retained payload.
  struct History {Key key{};uint64_t time=0,query=0,group=0;};
- struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::unordered_map<Key,uint64_t,Hash> frequencies; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
+ struct Shard {std::mutex mu;std::unordered_map<Key,std::shared_ptr<SharedRequest>,Hash> map;std::unique_ptr<History[]> history; std::unordered_map<Key,uint64_t,Hash> frequencies; FrequencySketch sketch; std::list<Key> lru,expiry; uint64_t ready_bytes=0;};
  static size_t history_slot(Key k){return (Hash{}(k)>>6)%1024;}
  std::array<Shard,64> shards;
  std::shared_ptr<Budget> budget=std::make_shared<Budget>();
@@ -69,7 +70,8 @@ class Coordinator {
  static bool ttl(){return config().retention=="ttl"||config().retention=="ttl-lru";}
  static bool frequency(){return config().retention=="frequency";}
  static bool lru(){return config().retention=="lru"||config().retention=="ttl-lru"||frequency();}
- static uint64_t count(const Shard& sh,Key k){auto i=sh.frequencies.find(k);return i==sh.frequencies.end()?0:i->second;}
+ static bool cms(){return config().frequency_mode=="cms";}
+ static uint64_t count(const Shard& sh,Key k){if(cms())return sh.sketch.estimate(k.offset,k.length);auto i=sh.frequencies.find(k);return i==sh.frequencies.end()?0:i->second;}
  static bool dynamic(){return ttl()||lru();}
  static bool expired(const SharedRequest& p,uint64_t now){return ttl()&&(now-p.published)/1000>=config().ready_ttl_us;}
  // All list/map operations under the owning shard lock. No cross-shard locking.
@@ -115,6 +117,7 @@ class Coordinator {
   p->lru_pos=std::prev(sh.lru.end());p->expiry_pos=std::prev(sh.expiry.end());sh.ready_bytes+=p->key.length;return true;
  }
 public:
+ Coordinator(){if(frequency()&&cms()){for(auto& sh:shards)sh.sketch.init(config().frequency_budget/64,config().frequency_depth);}}
  struct Ticket {std::shared_ptr<SharedRequest> req;bool owner=false;bool ready_hit=false;};
  uint64_t used()const{return budget->used.load();}
  uint64_t peak()const{return budget->peak.load();}
@@ -128,7 +131,7 @@ public:
     if(!it->second->retained){++it;continue;}
     budget->ready.fetch_sub(it->first.length);it=sh.map.erase(it);
    }
-   sh.history.reset();sh.frequencies.clear();sh.frequencies.rehash(0);sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
+   sh.history.reset();sh.frequencies.clear();sh.frequencies.rehash(0);sh.sketch.clear();sh.lru.clear();sh.expiry.clear();sh.ready_bytes=0;
   }
  }
  Ticket acquire(Key k,uint64_t qid,uint64_t limit,bool share=true){
@@ -137,7 +140,8 @@ public:
   const auto begin=diag?now_ns():0;
   if(frequency()){
    auto* q=current();const auto t=diag?now_ns():0;
-   try{auto& n=sh.frequencies[k];if(n!=UINT64_MAX)++n;if(q){++q->frequency_updates;q->frequency_shard_entries=std::max(q->frequency_shard_entries,static_cast<uint64_t>(sh.frequencies.size()));}}
+   if(cms()){auto n=sh.sketch.increment(k.offset,k.length);if(q){++q->frequency_updates;q->frequency_saturations+=n;q->frequency_counter_bytes=64*sh.sketch.bytes();}}
+   else try{auto& n=sh.frequencies[k];if(n!=UINT64_MAX)++n;if(q){++q->frequency_updates;q->frequency_shard_entries=std::max(q->frequency_shard_entries,static_cast<uint64_t>(sh.frequencies.size()));}}
    catch(const std::bad_alloc&){if(q)++q->frequency_update_failures;}
    if(diag)diag->frequency_tracking_ns+=now_ns()-t;
   }
