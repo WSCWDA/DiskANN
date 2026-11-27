@@ -12,7 +12,7 @@ class Tests(unittest.TestCase):
         for r,t,b,i in plan('core')+plan('sensitivity'):
             if POLICIES[i][2]=='none':self.assertEqual(b,16)
     def test_factors(self):
-        z={'A'+str(j):{'e2e_qps':2**(j&1)*3**((j>>1)&1)*5**((j>>2)&1)} for j in range(8)}
+        z={('A0','A1','A2','A4','A3','A5','A6','A7')[j]:{'e2e_qps':2**(j&1)*3**((j>>1)&1)*5**((j>>2)&1)} for j in range(8)}
         e=effects(z)
         for k,n in [('G',2),('S',3),('R',5)]:self.assertAlmostEqual(e['effect_'+k],math.log(n))
         for k in ('GS','GR','SR','GSR'):self.assertAlmostEqual(e['effect_'+k],0)

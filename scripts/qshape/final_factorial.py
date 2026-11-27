@@ -102,7 +102,7 @@ def effects(z):
     import math
     out={}
     for mask in range(1,8):
-        out['effect_'+''.join(k for bit,k in ((1,'G'),(2,'S'),(4,'R')) if mask&bit)]=sum((1 if ((j&mask).bit_count()%2)==mask.bit_count()%2 else -1)*math.log(z['A'+str(j)]['e2e_qps']) for j in range(8))/4
+        out['effect_'+''.join(k for bit,k in ((1,'G'),(2,'S'),(4,'R')) if mask&bit)]=sum((1 if (bin(j&mask).count('1')%2)==bin(mask).count('1')%2 else -1)*math.log(z[('A0','A1','A2','A4','A3','A5','A6','A7')[j]]['e2e_qps']) for j in range(8))/4
     return out
 def validate(root):
     m=load(root/'manifest.json');cases=plan(m['stage']);ck(m['cases']==[list(c) for c in cases],'matrix')
