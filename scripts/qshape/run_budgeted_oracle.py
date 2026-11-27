@@ -27,7 +27,7 @@ def source_check(source,repeats):
 def cpp_check(root,key,ids,bench,baseline):
     path=root/(key+'.ids')
     with path.open('w') as f:f.writelines(str(int(k)//4096)+'\n' for k in ids)
-    c=dict(policy='cms',n=str(int(max(ids))//4096+1),ops=str(len(ids)),skew='0',seed='42',ready_budget='16777216',meta_budget='524288',mode='perf')
+    c=dict(policy='cms',n=str(int(max(ids))//4096+1),ops=str(len(ids)),skew='0',seed='42',ready_budget='16777216',meta_budget='524288',mode='diag')
     dest=root/(key+'_cpp.csv')
     try:
         with dest.open('w') as f:subprocess.run([str(bench),*[c[k] for k in ('policy','n','ops','skew','seed','ready_budget','meta_budget','mode')],str(path)],stdout=f,check=True,timeout=1800)
@@ -86,7 +86,7 @@ def validate(root):
             rec=load(root/(key+'_cpp.json'));cpp=root/(key+'_cpp.csv')
             ck(digest(cpp)==rec['sha256'],'cpp receipt')
             x=validate_row(cpp,rec['config'])
-            ck(int(x['ops'])==c['ops'] and x['policy']=='cms' and x['counter_bytes']==524288 and x['saturations']==0,'cpp configuration')
+            ck(int(x['ops'])==c['ops'] and x['policy']=='cms' and x['mode']=='diag' and x['counter_bytes']==524288 and x['saturations']==0,'cpp configuration')
             for a,b in [('hits','hits'),('reads','misses'),('admissions','main_inserts'),('rejects','rejects'),('evictions','main_evictions'),('resident','main_resident'),('unused_evictions','main_unused')]:ck(x[a]==c[b],'cpp mismatch '+a)
         rows.append(dict(repeat=r,order=o,policy=p,elapsed_ns=d['elapsed_ns'],**c))
     base={(d['repeat'],d['order']):d for d in rows if d['policy']=='O0'}
